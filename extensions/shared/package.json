@@ -1,0 +1,11 @@
+{
+  "name": "@aibridge/extension-shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI-Bridge 浏览器扩展共享层：契约类型镜像、cookie ↔ 契约 Cookie 映射、SessionEnvelope 编解码、native messaging 桥协议 v1",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --experimental-test-isolation=none test/types.test.ts test/cookie.test.ts test/envelope.test.ts test/bridge.test.ts"
+  }
+}

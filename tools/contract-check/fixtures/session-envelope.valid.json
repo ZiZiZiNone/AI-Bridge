@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "account_ref": "acc-1",
+  "target": { "kind": "web", "domain": "github.com" },
+  "kind": "cookie",
+  "payload": {
+    "cookies": [
+      {
+        "name": "user_session",
+        "value": "sess-value",
+        "domain": "github.com",
+        "path": "/",
+        "secure": true,
+        "http_only": true,
+        "same_site": "lax",
+        "expires_at": "2026-12-01T00:00:00Z"
+      }
+    ]
+  },
+  "issued_at": "2026-02-01T08:30:00Z",
+  "expires_at": "2026-02-01T09:30:00Z",
+  "source": { "type": "extension", "id": "chromium" }
+}

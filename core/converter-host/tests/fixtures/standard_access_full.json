@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "app_id": "qq",
+  "level": "c",
+  "generated_at": "2026-10-09T10:00:00Z",
+  "credentials": [
+    {
+      "account_ref": "acc-qq-1",
+      "kind": "password",
+      "username": "u_10001",
+      "secret": "fixture-only-not-a-real-secret",
+      "url": "https://example.invalid/qq"
+    }
+  ],
+  "sessions": [
+    {
+      "account_ref": "acc-qq-1",
+      "target": {
+        "kind": "web",
+        "domain": "example.invalid"
+      },
+      "kind": "cookie",
+      "payload": {
+        "cookies": [
+          {
+            "name": "uin",
+            "value": "o1234567890",
+            "domain": "example.invalid",
+            "path": "/",
+            "secure": true,
+            "http_only": true,
+            "same_site": "lax",
+            "expires_at": "2026-12-01T00:00:00Z"
+          }
+        ]
+      },
+      "expires_at": "2026-12-01T00:00:00Z",
+      "source": {
+        "type": "converter",
+        "id": "qq"
+      }
+    }
+  ],
+  "meta": {
+    "converter_version": "1.2.0",
+    "collected_at": "2026-10-09T10:00:00Z"
+  }
+}

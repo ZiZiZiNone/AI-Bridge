@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AI-Bridge · 字符串资源。显示名一律 AI-Bridge（项目名与 UI 显示名同一）。 -->
+<resources>
+    <string name="app_name">AI-Bridge</string>
+    <string name="autofill_service_label">AI-Bridge</string>
+</resources>

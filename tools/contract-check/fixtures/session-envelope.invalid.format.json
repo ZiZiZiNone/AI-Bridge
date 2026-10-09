@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "account_ref": "acc-1",
+  "target": { "kind": "web", "domain": "github.com" },
+  "kind": "cookie",
+  "payload": {
+    "cookies": [{ "name": "user_session", "value": "sess-value" }]
+  },
+  "issued_at": "2026/02/01 08:30:00",
+  "source": { "type": "extension", "id": "chromium" }
+}

@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aibridge.local/schemas/standard-access.schema.json",
+  "title": "StandardAccess",
+  "description": "标准接入格式：一切端（转换器 / 浏览器扩展 / 移动通道）向核心输出的统一格式。唯一事实源；core/contract 的 Rust 类型与本文件逐字段一致。",
+  "type": "object",
+  "required": ["schema_version", "app_id", "level", "generated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "app_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+      "description": "目标应用标识，如 qq、chrome、github"
+    },
+    "level": {
+      "enum": ["c", "b", "a"],
+      "description": "接入等级：c=会话注入，b=凭据填表，a=仅启动"
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "credentials": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/credential" },
+      "description": "凭据类产物（账号密码 / passkey / TOTP）"
+    },
+    "sessions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/session" },
+      "description": "会话类产物（cookie / token）"
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "来源自述信息（转换器版本、采集时间等），仅展示用"
+    }
+  },
+  "$defs": {
+    "credential": {
+      "type": "object",
+      "required": ["account_ref", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "account_ref": { "type": "string", "description": "账号引用（与库内条目对应）" },
+        "kind": { "enum": ["password", "passkey", "totp"] },
+        "username": { "type": "string" },
+        "secret": {
+          "type": "string",
+          "description": "敏感字段：仅内存传递，落库前必须加密；绝不写日志"
+        },
+        "totp_seed": { "type": "string" },
+        "url": { "type": "string" }
+      }
+    },
+    "cookie": {
+      "type": "object",
+      "required": ["name", "value"],
+      "additionalProperties": false,
+      "description": "会话保真度关键：属性必须完整携带，任何环节不得丢弃",
+      "properties": {
+        "name": { "type": "string" },
+        "value": { "type": "string" },
+        "domain": { "type": "string" },
+        "path": { "type": "string" },
+        "secure": { "type": "boolean" },
+        "http_only": { "type": "boolean" },
+        "same_site": { "enum": ["strict", "lax", "none"] },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "session": {
+      "type": "object",
+      "required": ["account_ref", "target", "kind", "payload", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "account_ref": { "type": "string" },
+        "target": { "$ref": "#/$defs/target" },
+        "kind": { "enum": ["cookie", "token", "credential"] },
+        "payload": { "$ref": "#/$defs/payload" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "source": { "$ref": "#/$defs/source" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["web", "app", "container"] },
+        "domain": { "type": "string", "description": "kind=web 时必填" },
+        "app_id": { "type": "string", "description": "kind=app 时必填" }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "按 kind 取用：cookie→cookies；token→token；credential→credential。一致性由 core/contract 的 validate 校验。",
+      "properties": {
+        "cookies": { "type": "array", "items": { "$ref": "#/$defs/cookie" } },
+        "token": { "type": "string" },
+        "credential": {
+          "type": "object",
+          "required": ["username", "secret"],
+          "additionalProperties": false,
+          "properties": {
+            "username": { "type": "string" },
+            "secret": { "type": "string" }
+          }
+        },
+        "local_storage": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "可选：token 存 localStorage 的站点需要；键值对原样搬运"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["type", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["extension", "converter", "mobile", "manual", "sync"] },
+        "id": { "type": "string" }
+      }
+    }
+  }
+}

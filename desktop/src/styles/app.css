@@ -1,0 +1,86 @@
+/*
+ * AI-Bridge 桌面端基础样式。
+ * 设计 token 为骨架占位（接入设计稿后替换）；此处不写任何与业务语义相关的样式分支。
+ */
+:root {
+  color-scheme: light dark;
+  --ab-bg: #f6f7f9;
+  --ab-surface: #ffffff;
+  --ab-border: #d8dbe0;
+  --ab-text: #1c1f23;
+  --ab-text-weak: #6b7280;
+  --ab-accent: #2f6fed;
+  --ab-radius: 10px;
+  --ab-gap: 12px;
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ab-text);
+  background: var(--ab-bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ab-bg: #1b1d21;
+    --ab-surface: #24272c;
+    --ab-border: #363a41;
+    --ab-text: #eceef1;
+    --ab-text-weak: #9aa1ab;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 窗口/面板通用：四组界面（托盘·候选条·面板·向导）共用的排版骨架 */
+.view {
+  margin: 0;
+  padding: var(--ab-gap);
+}
+
+.view__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.view__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.view__no {
+  color: var(--ab-text-weak);
+  font-size: 12px;
+}
+
+.view__hint {
+  margin: 8px 0 0;
+  color: var(--ab-text-weak);
+  font-size: 12px;
+}
+
+.view__empty {
+  margin: 12px 0 0;
+  padding: 16px;
+  border: 1px dashed var(--ab-border);
+  border-radius: var(--ab-radius);
+  color: var(--ab-text-weak);
+  text-align: center;
+}

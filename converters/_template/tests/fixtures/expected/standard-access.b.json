@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "app_id": "sample-app",
+  "level": "b",
+  "generated_at": "2026-01-15T08:30:00Z",
+  "credentials": [
+    {
+      "account_ref": "sample-app-acc-1",
+      "kind": "password",
+      "username": "demo.user@sample-app.example",
+      "secret": "fixture-password-1",
+      "url": "https://portal.sample-app.example/login"
+    },
+    {
+      "account_ref": "sample-app-acc-1",
+      "kind": "totp",
+      "username": "demo.user@sample-app.example",
+      "totp_seed": "fixture-totp-seed-1",
+      "url": "https://portal.sample-app.example"
+    },
+    {
+      "account_ref": "sample-app-acc-1",
+      "kind": "passkey",
+      "username": "demo.user@sample-app.example",
+      "url": "https://portal.sample-app.example"
+    }
+  ],
+  "meta": {
+    "converter_version": "0.1.0",
+    "collected_at": "2026-01-15T08:30:00Z",
+    "source_files": ["{APPDATA}\\sample-app\\session-store.json"]
+  }
+}

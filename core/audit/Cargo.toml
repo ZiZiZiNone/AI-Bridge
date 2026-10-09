@@ -1,0 +1,10 @@
+[package]
+name = "ab-audit"
+version.workspace = true
+edition.workspace = true
+description = "追加式审计：事件入账与查询，历史不可删改（只追加）"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ab-contract = { path = "../contract" }

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aibridge.local/schemas/session-envelope.schema.json",
+  "title": "SessionEnvelope",
+  "description": "会话信封：扩散 / 临时会话 / 离线传送包(A8) 的统一载体。会话保真度关键：cookie 属性完整携带，任何环节不得丢弃。",
+  "type": "object",
+  "required": ["schema_version", "account_ref", "target", "kind", "payload", "issued_at", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "account_ref": { "type": "string", "description": "账号引用（与库内条目对应）" },
+    "target": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["web", "app", "container"] },
+        "domain": { "type": "string", "description": "kind=web 时必填" },
+        "app_id": { "type": "string", "description": "kind=app 时必填" }
+      }
+    },
+    "kind": { "enum": ["cookie", "token", "credential"] },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "按 kind 取用：cookie→cookies；token→token；credential→credential。一致性由 core/contract 的 validate 校验。",
+      "properties": {
+        "cookies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "type": "string" },
+              "domain": { "type": "string" },
+              "path": { "type": "string" },
+              "secure": { "type": "boolean" },
+              "http_only": { "type": "boolean" },
+              "same_site": { "enum": ["strict", "lax", "none"] },
+              "expires_at": { "type": "string", "format": "date-time" }
+            }
+          }
+        },
+        "token": { "type": "string" },
+        "credential": {
+          "type": "object",
+          "required": ["username", "secret"],
+          "additionalProperties": false,
+          "properties": {
+            "username": { "type": "string" },
+            "secret": { "type": "string" }
+          }
+        },
+        "local_storage": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "临时会话必填（由 core/contract validate 校验）"
+    },
+    "source": {
+      "type": "object",
+      "required": ["type", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["extension", "converter", "mobile", "manual", "sync"] },
+        "id": { "type": "string" }
+      }
+    }
+  }
+}

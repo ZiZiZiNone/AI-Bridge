@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "app_id": "chrome",
+  "level": "c",
+  "generated_at": "2026-02-01T08:30:00Z",
+  "sessions": [
+    {
+      "account_ref": "acc-2",
+      "target": { "kind": "web", "domain": "github.com" },
+      "kind": "cookie",
+      "payload": { "token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhY2MtMiJ9" },
+      "source": { "type": "extension", "id": "chromium" }
+    }
+  ]
+}

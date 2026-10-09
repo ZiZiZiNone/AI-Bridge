@@ -1,9 +1,14 @@
 # === 工具缓存（过程产物，不入库）===
+__pycache__/
+*.pyc
 .npm-cache/
 .firecrawl/
 .research/
 research/
 node_modules/
+
+# === 构建期缓存（集中放置，项目收尾统一清理）===
+.cargo-home/
 
 # === 开发过程文档（设计稿，非最终产物，不入库）===
 docs/
@@ -20,6 +25,7 @@ web-ext-artifacts/
 *.log
 
 # === 移动端 ===
+mobile/ffi/generated/
 .gradle/
 local.properties
 Pods/

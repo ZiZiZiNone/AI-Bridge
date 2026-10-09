@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AI-Bridge 自动填充服务配置（android.service.autofill.AutofillService 配套资源）。 -->
+<autofill-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="com.aibridge.mobile.MainActivity" />

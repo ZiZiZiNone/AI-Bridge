@@ -1,0 +1,10 @@
+[package]
+name = "ab-state"
+version.workspace = true
+edition.workspace = true
+description = "会话状态层：清单矩阵 / 覆盖前快照 / 回滚 / 健康分级（依赖全部构造注入，零宿主依赖）"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ab-contract = { path = "../contract" }

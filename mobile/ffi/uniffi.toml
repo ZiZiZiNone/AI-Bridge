@@ -1,0 +1,13 @@
+# AI-Bridge · UniFFI 生成配置（文本配置，非工程文件）
+#
+# 用途：uniffi-bindgen 依本配置与 aibridge.udl 生成 Swift / Kotlin 绑定。
+# 生成命令见 mobile/README.md「FFI 生成」；生成物禁止手改。
+# 说明：UniFFI 按语言惯例把 snake_case 标识转为 camelCase（Kotlin 方法/属性名），
+#       跨端 JSON 载荷仍由 serde 按 schema 的 snake_case 输出，契约字段不受生成器影响。
+
+[bindings.kotlin]
+package_name = "com.aibridge.mobile.ffi"
+
+[bindings.swift]
+module_name = "aibridge"
+ffi_module_name = "aibridgeFFI"

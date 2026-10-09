@@ -1,0 +1,16 @@
+{
+  "id": "qq",
+  "name": "QQ 本地数据转换器",
+  "version": "1.2.0",
+  "level": "c",
+  "readable_paths": [
+    "C:\\Users\\me\\AppData\\Roaming\\QQ"
+  ],
+  "entry": "qq.wasm",
+  "signature": {
+    "algorithm": "ed25519",
+    "signer": "official-2026",
+    "value": "6f1d0b2a4c8e7395a0b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f6071"
+  },
+  "min_app_version": "0.1.0"
+}

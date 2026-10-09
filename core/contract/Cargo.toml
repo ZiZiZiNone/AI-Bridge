@@ -1,0 +1,9 @@
+[package]
+name = "ab-contract"
+version.workspace = true
+edition.workspace = true
+description = "契约层唯一实现：数据定义 + 结构校验，零业务规则"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

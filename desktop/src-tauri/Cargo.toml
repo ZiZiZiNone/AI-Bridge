@@ -1,0 +1,27 @@
+[package]
+name = "ab-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "AI-Bridge Windows 桌面端（Tauri 2 宿主层，薄入口）"
+publish = false
+
+# 独立 workspace：仓库根 Cargo.toml 的 members 仅为 core/*，本 crate 不入其 members，
+# 也不改动根清单（本任务写 scope 仅 desktop/）。待根清单纳入本包后，可删除本表并把
+# 依赖改为 workspace = true（serde / serde_json 与根 workspace 版本线一致）。
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# 未验证：本机未安装 cargo / rustc，未执行 cargo check / cargo build，
+# Tauri 2 依赖版本线与 API 形态均未经编译验证（按 2.x 稳定线写）。
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

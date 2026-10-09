@@ -1,0 +1,9 @@
+[package]
+name = "ab-converter"
+version.workspace = true
+edition.workspace = true
+description = "转换器宿主：加载 · 验签 · 沙盒执行 · 接入等级裁剪 · 只读路径守卫（依赖全部经构造注入）"
+
+[dependencies]
+ab-contract = { path = "../contract" }
+serde_json.workspace = true

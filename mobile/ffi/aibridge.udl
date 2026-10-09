@@ -1,0 +1,390 @@
+// AI-Bridge · UniFFI 接口声明（core API 镜像 · 声明骨架）
+//
+// 唯一事实源：
+//   - core 各 crate 的 Rust 公开面（docs/架构与契约.md §2 的"公开面"列）
+//   - 契约字段（contracts/*.schema.json，逐字段一致）
+// 本文件是**声明骨架**：Swift / Kotlin 绑定产物由 uniffi-bindgen 生成，生成物禁止手改
+// （生成步骤见 mobile/README.md「FFI 生成」）。core/ab-ffi 尚未实现，故本文件先于实现落地。
+//
+// 命名：契约字段一律 snake_case，与 schema 逐字段一致；生成器可能按语言惯例把方法/字段
+//       转成 camelCase，但跨端载荷（JSON）始终以 schema 的 snake_case 为准（由 serde 负责）。
+// 依赖方向：宿主 → 本声明 → core；core 永不依赖任何宿主类型（Tauri / WebView / 平台对象）。
+// 注入规则：core 全部外部能力以 trait 注入（VaultStore / SessionSource / Transport / Clock /
+//           Entropy）；本文件不提供任何单例式全局访问器。
+
+namespace aibridge {
+    // 组合根：core 对象由宿主显式构造并注入全部 trait（无单例、无服务定位器）。
+    AibridgeCore new_core(
+        CoreConfig config,
+        VaultStore vault_store,
+        SessionSource session_source,
+        Transport transport,
+        Clock clock,
+        Entropy entropy
+    );
+};
+
+/* ======================= core 公开面（对象） ======================= */
+
+// 聚合入口：各子模块对象由 core 持有，宿主只经本对象取得句柄。
+interface AibridgeCore {
+    Vault vault();
+    StateBus state();
+    Broker broker();
+    SyncEngine sync();
+    ConverterHost converter_host();
+    AuditLog audit();
+};
+
+// ab-vault：加密库（条目 / 回收站 / passkey / TOTP / 生成器）。
+// 存储经 `VaultStore` 注入；本声明不含任何文件 IO 语义。
+interface Vault {
+    [Throws=CoreError] void unlock(string master_password);
+    void lock();
+    boolean is_locked();
+    [Throws=CoreError] sequence<EntrySummary> list_entries(string? query);
+    [Throws=CoreError] Entry get_entry(string account_ref);
+    [Throws=CoreError] void put_entry(Entry entry);
+    [Throws=CoreError] void delete_entry(string account_ref);
+    sequence<EntrySummary> trash();
+    [Throws=CoreError] void restore(string account_ref);
+    [Throws=CoreError] GeneratedSecret generate(GeneratorSpec spec);
+    [Throws=CoreError] string totp(string account_ref);
+};
+
+// ab-state：会话状态（清单矩阵 / 快照 / 回滚 / 健康）；浏览器与容器经 `SessionSource` 注入。
+interface StateBus {
+    sequence<MatrixRow> matrix();
+    [Throws=CoreError] SessionEnvelope capture(string source_id, string domain);
+    sequence<SnapshotSummary> snapshot();
+    [Throws=CoreError] void rollback(string snapshot_id);
+    HealthReport health();
+};
+
+// ab-broker：临时会话（签发 / TTL / 空闲 / 撤销表）；真实会话由 broker 代持。
+interface Broker {
+    [Throws=CoreError] IssuedSession issue(ScopeSpec scope, u32 ttl_seconds);
+    [Throws=CoreError] IssuedSession renew(string session_id, u32 ttl_seconds);
+    [Throws=CoreError] void release(string session_id);
+    [Throws=CoreError] void revoke(string session_id);
+    sequence<IssuedSession> revoke_all();
+    sequence<IssuedSession> list_sessions();
+    sequence<IssuedSession> sweep();
+};
+
+// ab-sync：配对与传输（X25519 指纹配对 / 局域网直传 / A8 离线包）。
+interface SyncEngine {
+    [Throws=CoreError] PairingTicket pair();
+    [Throws=CoreError] PairingTicket confirm(string ticket_id, string remote_fingerprint);
+    [Throws=CoreError] TransferReport transfer(string peer_id, sequence<SessionEnvelope> envelopes);
+    [Throws=CoreError] bytes pack(sequence<SessionEnvelope> envelopes);
+    [Throws=CoreError] sequence<SessionEnvelope> unpack(bytes package);
+};
+
+// ab-converter：转换器宿主（验签 / 加载 / 沙盒执行）。
+// 移动端不执行转换器（转换器读取桌面本地数据产物）；保留镜像以保持接口面完整。
+interface ConverterHost {
+    [Throws=CoreError] void load(ConverterManifest manifest);
+    [Throws=CoreError] ManifestVerification verify(ConverterManifest manifest);
+    [Throws=CoreError] StandardAccess run_extract(string converter_id, string level);
+};
+
+// ab-audit：追加式审计（只追加，不删改历史）。
+interface AuditLog {
+    [Throws=CoreError] void record(AuditEvent event);
+    sequence<AuditEvent> query(AuditFilter filter);
+};
+
+// ab-mcp：MCP server（rmcp，stdio + Streamable HTTP）。
+// 仅 desktop 宿主启动；移动端无 MCP 客户端，保留镜像以保持接口面完整。
+interface McpServer {
+    [Throws=CoreError] void serve();
+    sequence<McpTool> tools();
+};
+
+/* ======================= 宿主必须实现的 traits ======================= */
+// core 经构造注入调用这些 trait；绑定侧（Swift / Kotlin）由宿主实现。
+// 这五个 trait 是"极致解耦"判据的落点：把 core 搬进单测时替换它们即可，不改 core 内部代码。
+
+// 加密库存储：只存不透明字节，键值语义由 core 决定。
+[Trait]
+interface VaultStore {
+    [Throws=CoreError] bytes read(string key);
+    [Throws=CoreError] void write(string key, bytes value);
+    [Throws=CoreError] void remove(string key);
+    [Throws=CoreError] sequence<string> list_keys();
+};
+
+// 会话来源：浏览器扩展 / App 容器（WKWebView / Android WebView）。
+// cookie 属性必须完整往返（会话保真度关键）。
+[Trait]
+interface SessionSource {
+    sequence<string> available_sources();
+    sequence<Cookie> capture(string source_id, string domain);
+    void inject(string source_id, sequence<Cookie> cookies);
+};
+
+// 传输：局域网直传 / 离线包搬运；core 不持有任何网络句柄。
+[Trait]
+interface Transport {
+    sequence<PeerInfo> peers();
+    [Throws=CoreError] void send(string peer_id, bytes payload);
+    bytes? receive(u32 timeout_millis);
+};
+
+// 时钟：注入以便单测与 TTL 判定（core 不自取系统时间）。
+[Trait]
+interface Clock {
+    string now_rfc3339();
+};
+
+// 熵源：生成器与密钥派生的随机来源（core 不自取系统随机）。
+[Trait]
+interface Entropy {
+    bytes fill(u32 length);
+};
+
+/* ======================= 契约层镜像（contracts/*.schema.json） ======================= */
+// 与 schema 逐字段一致；新增字段一律可选（版本化规则见 docs/架构与契约.md §6）。
+
+dictionary CoreConfig {
+    string data_dir;
+    string display_name;
+};
+
+dictionary Cookie {
+    string name;
+    string value;
+    string? domain;
+    string? path;
+    boolean? secure;
+    boolean? http_only;
+    SameSite? same_site;
+    string? expires_at;
+};
+
+dictionary Target {
+    TargetKind kind;
+    string? domain;
+    string? app_id;
+};
+
+dictionary PlainCredential {
+    string username;
+    string secret;
+};
+
+dictionary Payload {
+    sequence<Cookie> cookies;
+    string? token;
+    PlainCredential? credential;
+    record<string, string> local_storage;
+};
+
+// schema 字段名为 "type"（core 侧以 serde rename 承载），UDL 侧用 source_type 以免与语言关键字冲突。
+dictionary Source {
+    SourceType source_type;
+    string id;
+};
+
+dictionary CredentialRecord {
+    string account_ref;
+    CredentialKind kind;
+    string? username;
+    string? secret;
+    string? totp_seed;
+    string? url;
+};
+
+dictionary SessionRecord {
+    string account_ref;
+    Target target;
+    SessionKind kind;
+    Payload payload;
+    string? expires_at;
+    Source source;
+};
+
+dictionary SessionEnvelope {
+    string schema_version;
+    string account_ref;
+    Target target;
+    SessionKind kind;
+    Payload payload;
+    string issued_at;
+    string? expires_at;
+    Source source;
+};
+
+dictionary StandardAccess {
+    string schema_version;
+    string app_id;
+    AccessLevel level;
+    string generated_at;
+    sequence<CredentialRecord> credentials;
+    sequence<SessionRecord> sessions;
+    record<string, string> meta;
+};
+
+dictionary Signature {
+    string algorithm;
+    string signer;
+    string value;
+};
+
+dictionary ConverterManifest {
+    string id;
+    string name;
+    string version;
+    AccessLevel level;
+    sequence<string> readable_paths;
+    string entry;
+    Signature signature;
+    string? min_app_version;
+};
+
+/* ======================= core 内部数据结构（非契约） ======================= */
+
+dictionary EntrySummary {
+    string account_ref;
+    string title;
+    CredentialKind kind;
+    string? username;
+    string? url;
+    string? updated_at;
+};
+
+dictionary Entry {
+    string account_ref;
+    string title;
+    CredentialKind kind;
+    string? username;
+    string? secret;
+    string? totp_seed;
+    string? url;
+    string? note;
+};
+
+dictionary GeneratorSpec {
+    u32 length;
+    boolean lowercase;
+    boolean uppercase;
+    boolean digits;
+    boolean symbols;
+};
+
+dictionary GeneratedSecret {
+    string value;
+    string charset;
+};
+
+dictionary MatrixRow {
+    string account_ref;
+    TargetKind target_kind;
+    string? domain;
+    string? app_id;
+    SourceType source_type;
+    string? expires_at;
+    string? last_seen_at;
+};
+
+dictionary SnapshotSummary {
+    string snapshot_id;
+    string created_at;
+    u32 entry_count;
+};
+
+dictionary HealthReport {
+    boolean vault_readable;
+    boolean sync_reachable;
+    sequence<string> warnings;
+};
+
+dictionary ScopeSpec {
+    sequence<string> domain_allowlist;
+    boolean read_only;
+    boolean single_use;
+};
+
+dictionary IssuedSession {
+    string session_id;
+    string account_ref;
+    string expires_at;
+    boolean revoked;
+};
+
+dictionary PairingTicket {
+    string ticket_id;
+    string fingerprint;
+    string? remote_fingerprint;
+};
+
+dictionary TransferReport {
+    u32 sent;
+    u32 failed;
+};
+
+dictionary ManifestVerification {
+    boolean valid;
+    string? reason;
+};
+
+dictionary AuditEvent {
+    string event_id;
+    string occurred_at;
+    string kind;
+    string detail;
+};
+
+dictionary AuditFilter {
+    string? kind;
+    string? since;
+    u32? limit;
+};
+
+dictionary PeerInfo {
+    string peer_id;
+    string device_kind;
+    string fingerprint;
+};
+
+dictionary McpTool {
+    string name;
+    string description;
+};
+
+/* ======================= 枚举 ======================= */
+
+enum AccessLevel { "C", "B", "A" };
+enum CredentialKind { "PASSWORD", "PASSKEY", "TOTP" };
+enum SessionKind { "COOKIE", "TOKEN", "CREDENTIAL" };
+enum TargetKind { "WEB", "APP", "CONTAINER" };
+enum SameSite { "STRICT", "LAX", "NONE" };
+enum SourceType { "EXTENSION", "CONVERTER", "MOBILE", "MANUAL", "SYNC" };
+
+/* ======================= 错误 ======================= */
+
+// core 内部错误（各 crate 细分错误待对应 crate 落地时收敛；骨架阶段统一经 CoreError 导出）。
+[Error]
+enum CoreError {
+    "CONTRACT",
+    "CRYPTO",
+    "STORAGE",
+    "NOT_FOUND",
+    "DENIED",
+    "TRANSPORT",
+    "CONVERSION",
+    "INTERNAL",
+};
+
+// ab-contract 的 ContractError 逐变体镜像（core/contract/src/lib.rs 已实现）。
+[Error]
+enum ContractError {
+    UnsupportedSchemaVersion(string version),
+    InvalidId(string field, string value),
+    EmptyField(string name),
+    TargetFieldMissing(string name),
+    PayloadMismatch(SessionKind kind, string expected),
+    UnsupportedAlgorithm(string algorithm),
+    MissingExpiry,
+};

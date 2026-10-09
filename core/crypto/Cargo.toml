@@ -1,0 +1,19 @@
+[package]
+name = "ab-crypto"
+version.workspace = true
+edition.workspace = true
+description = "密码学原语封装：全仓唯一允许引入密码学依赖的 crate"
+
+[dependencies]
+serde.workspace = true
+argon2 = "0.5"
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+hkdf = "0.12"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+subtle = "2"
+zeroize = { version = "1", features = ["derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+getrandom = "0.2"

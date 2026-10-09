@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "app_id": "sample-app",
+  "level": "a",
+  "generated_at": "2026-01-15T08:30:00Z",
+  "meta": {
+    "converter_version": "0.1.0",
+    "collected_at": "2026-01-15T08:30:00Z",
+    "source_files": ["{APPDATA}\\sample-app\\session-store.json"],
+    "launch": {
+      "app_id": "sample-app",
+      "executable_hint": "sample-app.exe"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "account_ref": "acc-1",
+  "target": { "kind": "app", "app_id": "qq" },
+  "kind": "credential",
+  "payload": { "credential": { "username": "john", "secret": "s3cret" } },
+  "issued_at": "2026-02-01T08:30:00Z",
+  "source": { "type": "unknown-device", "id": "device-7" }
+}

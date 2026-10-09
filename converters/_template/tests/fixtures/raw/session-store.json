@@ -1,0 +1,61 @@
+{
+  "store_version": 1,
+  "written_at": "2026-01-15T08:29:00Z",
+  "launch": {
+    "app_id": "sample-app",
+    "executable_hint": "sample-app.exe"
+  },
+  "accounts": [
+    {
+      "account_ref": "sample-app-acc-1",
+      "username": "demo.user@sample-app.example",
+      "display_name": "示例用户",
+      "site": "https://portal.sample-app.example",
+      "session": {
+        "token": "fixture-token-access-1",
+        "token_expires_at": "2026-01-15T09:30:00Z",
+        "cookies": [
+          {
+            "name": "sid",
+            "value": "fixture-cookie-sid-1",
+            "domain": "portal.sample-app.example",
+            "path": "/",
+            "secure": true,
+            "http_only": true,
+            "same_site": "lax",
+            "expires_at": "2026-02-15T08:30:00Z"
+          },
+          {
+            "name": "theme",
+            "value": "fixture-cookie-theme-1",
+            "domain": ".sample-app.example",
+            "path": "/",
+            "secure": true,
+            "http_only": false,
+            "same_site": "strict",
+            "expires_at": null
+          }
+        ]
+      },
+      "plain_credentials": [
+        {
+          "kind": "password",
+          "username": "demo.user@sample-app.example",
+          "secret": "fixture-password-1",
+          "url": "https://portal.sample-app.example/login"
+        },
+        {
+          "kind": "totp",
+          "username": "demo.user@sample-app.example",
+          "totp_seed": "fixture-totp-seed-1",
+          "url": "https://portal.sample-app.example"
+        },
+        {
+          "kind": "passkey",
+          "username": "demo.user@sample-app.example",
+          "url": "https://portal.sample-app.example"
+        }
+      ]
+    }
+  ]
+}
