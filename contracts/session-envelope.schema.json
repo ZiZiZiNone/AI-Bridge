@@ -73,6 +73,38 @@
         "type": { "enum": ["extension", "converter", "mobile", "manual", "sync"] },
         "id": { "type": "string" }
       }
+    },
+    "scope": {
+      "type": "object",
+      "required": ["domain_allowlist", "read_only", "single_use"],
+      "additionalProperties": false,
+      "description": "临时会话授权范围：AI 的能力上限。临时会话必填（validate_temporary 校验），业务强制在 ab-broker",
+      "properties": {
+        "domain_allowlist": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "可访问域名白名单；空数组 = 不允许任何 web 目标"
+        },
+        "read_only": { "type": "boolean" },
+        "single_use": { "type": "boolean" }
+      }
+    },
+    "client_env": {
+      "type": "object",
+      "required": ["user_agent", "platform"],
+      "additionalProperties": false,
+      "description": "会话捕获环境（UA 绑定）：捕获时记录、扩散随行、注入容器时对齐；不一致时提示可能触发风控",
+      "properties": {
+        "user_agent": { "type": "string" },
+        "platform": {
+          "type": "string",
+          "description": "平台标识：windows / macos / linux / android / ios / web"
+        },
+        "device_id": {
+          "type": "string",
+          "description": "可选设备指纹标识（尽力记录，不承诺可对齐）"
+        }
+      }
     }
   }
 }

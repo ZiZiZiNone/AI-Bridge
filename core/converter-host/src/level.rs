@@ -1,8 +1,4 @@
-//! 接入等级规则：**全仓唯一实现**（a 仅启动 / b 凭据填表 / c 会话注入）。
-//!
-//! 两个纯函数，无 IO、无状态：
-//! - [`effective_level`]：清单声明等级与调用方请求等级取**能力更弱**者（不越权）；
-//! - [`prune`]：按有效等级裁掉不该外流的数据段。
+//! 接入等级规则（a 仅启动 / b 凭据填表 / c 会话注入），全仓唯一实现。
 
 use ab_contract::{AccessLevel, StandardAccess};
 
@@ -23,20 +19,13 @@ fn from_rank(value: u8) -> AccessLevel {
     }
 }
 
-/// 有效等级 = 清单声明等级与请求等级中能力更弱的一个。
-///
-/// 例：清单声明 a（仅启动）的转换器，即使调用方请求 c，有效等级仍是 a。
+/// 清单能力与请求取更弱者：声明 a 的转换器，请求 c 也只能按 a 放行。
 pub fn effective_level(manifest_level: AccessLevel, requested: AccessLevel) -> AccessLevel {
     from_rank(rank(manifest_level).min(rank(requested)))
 }
 
-/// 按有效等级裁剪输出：
-/// - **a**：只留 meta 与启动信息（`app_id` / `level` / `generated_at`），`credentials`、`sessions` 一律清空；
-/// - **b**：只留 `credentials`（`sessions` 清空）；
-/// - **c**：全量，含 `sessions`。
-///
-/// `meta` 仅来源自述（转换器版本、采集时间等展示信息），不含凭据数据，三个等级均保留。
-/// 裁剪后把 `access.level` 写成有效等级，避免下游误读能力边界。
+/// a 清空 credentials+sessions，b 清空 sessions，c 全量；meta 是来源自述，三级均留。
+/// 裁剪后写回 `access.level`，避免下游误读能力边界。
 pub fn prune(access: &mut StandardAccess, effective: AccessLevel) {
     if matches!(effective, AccessLevel::A | AccessLevel::B) {
         access.sessions.clear();

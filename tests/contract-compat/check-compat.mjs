@@ -30,7 +30,7 @@ const SCHEMA_VERSION = '1.0';
  */
 const EXPECTED_REQUIRED = {
   'converter-manifest.schema.json': {
-    '#': ['entry', 'id', 'level', 'name', 'readable_paths', 'signature', 'version'],
+    '#': ['entry', 'id', 'level', 'module_sha256', 'name', 'readable_paths', 'signature', 'version'],
     '#/properties/signature': ['algorithm', 'signer', 'value'],
   },
   'session-envelope.schema.json': {
@@ -39,6 +39,8 @@ const EXPECTED_REQUIRED = {
     '#/properties/payload/properties/cookies/items': ['name', 'value'],
     '#/properties/payload/properties/credential': ['secret', 'username'],
     '#/properties/source': ['id', 'type'],
+    '#/properties/scope': ['domain_allowlist', 'read_only', 'single_use'],
+    '#/properties/client_env': ['platform', 'user_agent'],
   },
   'standard-access.schema.json': {
     '#': ['app_id', 'generated_at', 'level', 'schema_version'],
@@ -48,6 +50,8 @@ const EXPECTED_REQUIRED = {
     '#/$defs/target': ['kind'],
     '#/$defs/payload/properties/credential': ['secret', 'username'],
     '#/$defs/source': ['id', 'type'],
+    '#/properties/client_env': ['platform', 'user_agent'],
+    '#/$defs/session/properties/client_env': ['platform', 'user_agent'],
   },
 };
 

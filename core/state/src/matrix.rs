@@ -29,12 +29,6 @@ pub enum ExpiryFilter {
     WithoutExpiry,
 }
 
-impl Default for ExpiryFilter {
-    fn default() -> Self {
-        ExpiryFilter::Any
-    }
-}
-
 /// 主排序键。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

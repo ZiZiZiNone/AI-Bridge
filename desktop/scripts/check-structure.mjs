@@ -248,7 +248,8 @@ check('6. 契约字段逐字段一致（contracts/*.schema.json ↔ src/types/co
     const schema = JSON.parse(read(join(REPO, 'contracts', schemaFile)));
     const node = schemaNode(schema, path);
     const schemaFields = Object.keys(node);
-    const required = new Set(node.required ?? []);
+    // required 声明在承载 properties 的对象节点上（path 的父层），不在 properties 节点自身
+    const required = new Set(schemaNode(schema, path.slice(0, -1)).required ?? []);
     const tsFields = tsInterfaceFields(tsSource, interfaceName);
 
     const tsNames = tsFields.map((field) => field.name);

@@ -4,7 +4,7 @@
   "title": "ConverterManifest",
   "description": "转换器清单：每个标准转换器的声明文件（manifest.json）。仅官方签发：signature 校验通过方可启用。",
   "type": "object",
-  "required": ["id", "name", "version", "level", "readable_paths", "entry", "signature"],
+  "required": ["id", "name", "version", "level", "readable_paths", "entry", "module_sha256", "signature"],
   "additionalProperties": false,
   "properties": {
     "id": {
@@ -31,6 +31,11 @@
       "type": "string",
       "description": "转换器入口（WASM 模块文件名），沙盒内执行：无网络、只读声明路径、只输出 StandardAccess"
     },
+    "module_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "entry 模块字节的 SHA-256（hex 小写）。签名覆盖本字段，执行前必须与实际模块字节比对，防止「换模块保清单」"
+    },
     "signature": {
       "type": "object",
       "required": ["algorithm", "signer", "value"],
@@ -38,7 +43,11 @@
       "properties": {
         "algorithm": { "const": "ed25519" },
         "signer": { "type": "string", "description": "签名者标识（官方发布密钥 ID）" },
-        "value": { "type": "string", "description": "签名值（hex）" }
+        "value": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{128}$",
+          "description": "ed25519 签名值（128 位 hex 小写），覆盖清单全部字段（含 module_sha256）。全零占位值一律拒载"
+        }
       }
     },
     "min_app_version": {

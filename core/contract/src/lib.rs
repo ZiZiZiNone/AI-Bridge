@@ -1,22 +1,15 @@
-//! `ab-contract` —— 契约层唯一实现：数据定义 + 结构校验，**零业务规则**。
-//!
-//! 契约唯一事实源为仓库根 `contracts/*.schema.json`；本 crate 的类型与其逐字段一致。
-//! 消费者：core 全部 crate、转换器 SDK、扩展/移动的信封编解码。
-//!
-//! 分工边界：schema 管"数据长什么样"，本 crate 的 `validate` 管"字段之间的结构一致性"，
-//! 业务语义（TTL 策略、scope 授权等）一律在 `ab-broker` / `ab-mcp`，不许写进本 crate。
+//! `ab-contract` —— 契约类型与结构校验；唯一事实源 `contracts/*.schema.json`。
+#![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// 契约版本；`schema_version` 与之不符一律拒绝。
 pub const SCHEMA_VERSION: &str = "1.0";
 
-/* ---------------- 枚举 ---------------- */
+const REDACTED: &str = "[REDACTED]";
 
-/// 接入等级：c = 会话注入，b = 凭据填表，a = 仅启动。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AccessLevel {
@@ -67,10 +60,8 @@ pub enum SourceType {
     Sync,
 }
 
-/* ---------------- 公共结构 ---------------- */
-
-/// cookie 必须带完整属性：会话保真度关键，任何环节不得丢弃。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// 属性必须完整携带：丢属性 = 会话损坏。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cookie {
     pub name: String,
     pub value: String,
@@ -88,6 +79,22 @@ pub struct Cookie {
     pub expires_at: Option<String>,
 }
 
+// 手工 Debug 统一脱敏秘密字段（下同）。
+impl fmt::Debug for Cookie {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cookie")
+            .field("name", &self.name)
+            .field("value", &REDACTED)
+            .field("domain", &self.domain)
+            .field("path", &self.path)
+            .field("secure", &self.secure)
+            .field("http_only", &self.http_only)
+            .field("same_site", &self.same_site)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
     pub kind: TargetKind,
@@ -97,13 +104,22 @@ pub struct Target {
     pub app_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlainCredential {
     pub username: String,
     pub secret: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+impl fmt::Debug for PlainCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PlainCredential")
+            .field("username", &self.username)
+            .field("secret", &REDACTED)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Payload {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cookies: Vec<Cookie>,
@@ -115,6 +131,20 @@ pub struct Payload {
     pub local_storage: BTreeMap<String, String>,
 }
 
+impl fmt::Debug for Payload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Payload")
+            .field("cookies", &self.cookies)
+            .field("token", &self.token.as_deref().map(|_| REDACTED))
+            .field("credential", &self.credential)
+            .field(
+                "local_storage",
+                &self.local_storage.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     #[serde(rename = "type")]
@@ -122,9 +152,25 @@ pub struct Source {
     pub id: String,
 }
 
-/* ---------------- StandardAccess（standard-access.schema.json） ---------------- */
-
+/// 临时会话授权范围；业务强制在 ab-broker，本层只承载结构。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeSpec {
+    /// 空数组 = 不允许任何 web 目标。
+    pub domain_allowlist: Vec<String>,
+    pub read_only: bool,
+    pub single_use: bool,
+}
+
+/// 会话捕获环境（UA 绑定）：随行记录，注入容器时对齐。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientEnv {
+    pub user_agent: String,
+    pub platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialRecord {
     pub account_ref: String,
     pub kind: CredentialKind,
@@ -138,6 +184,19 @@ pub struct CredentialRecord {
     pub url: Option<String>,
 }
 
+impl fmt::Debug for CredentialRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialRecord")
+            .field("account_ref", &self.account_ref)
+            .field("kind", &self.kind)
+            .field("username", &self.username)
+            .field("secret", &self.secret.as_deref().map(|_| REDACTED))
+            .field("totp_seed", &self.totp_seed.as_deref().map(|_| REDACTED))
+            .field("url", &self.url)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub account_ref: String,
@@ -147,6 +206,8 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     pub source: Source,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_env: Option<ClientEnv>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,9 +222,9 @@ pub struct StandardAccess {
     pub sessions: Vec<SessionRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub meta: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_env: Option<ClientEnv>,
 }
-
-/* ---------------- SessionEnvelope（session-envelope.schema.json） ---------------- */
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEnvelope {
@@ -176,9 +237,11 @@ pub struct SessionEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     pub source: Source,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScopeSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_env: Option<ClientEnv>,
 }
-
-/* ---------------- ConverterManifest（converter-manifest.schema.json） ---------------- */
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature {
@@ -195,14 +258,13 @@ pub struct ConverterManifest {
     pub level: AccessLevel,
     pub readable_paths: Vec<String>,
     pub entry: String,
+    /// entry 字节的 SHA-256；签名覆盖它，执行前比对实际字节。
+    pub module_sha256: String,
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_app_version: Option<String>,
 }
 
-/* ---------------- 校验 ---------------- */
-
-/// 结构校验错误。业务语义错误不在此列（属 ab-broker / ab-mcp）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractError {
     UnsupportedSchemaVersion(String),
@@ -212,6 +274,9 @@ pub enum ContractError {
     PayloadMismatch { kind: SessionKind, expected: &'static str },
     UnsupportedAlgorithm(String),
     MissingExpiry,
+    MissingScope,
+    PlaceholderSignature,
+    InvalidModuleHash,
 }
 
 impl fmt::Display for ContractError {
@@ -230,6 +295,11 @@ impl fmt::Display for ContractError {
             }
             ContractError::UnsupportedAlgorithm(a) => write!(f, "不支持的签名算法 {a}（仅 ed25519）"),
             ContractError::MissingExpiry => write!(f, "临时会话必须携带 expires_at"),
+            ContractError::MissingScope => write!(f, "临时会话必须携带 scope"),
+            ContractError::PlaceholderSignature => write!(f, "签名是占位值（全零），拒绝加载"),
+            ContractError::InvalidModuleHash => {
+                write!(f, "module_sha256 必须是 64 位小写 hex 且不得为占位值")
+            }
         }
     }
 }
@@ -247,6 +317,15 @@ fn valid_id(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// 全零是模板占位约定，永不是真签名/真摘要。
+fn is_all_zero_hex(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b == b'0')
 }
 
 fn check_schema_version(v: &str) -> Result<(), ContractError> {
@@ -309,22 +388,22 @@ impl SessionRecord {
 }
 
 impl SessionEnvelope {
-    /// 结构校验：schema_version、target、kind/payload 一致性。
     pub fn validate(&self) -> Result<(), ContractError> {
         check_schema_version(&self.schema_version)?;
         self.as_record().validate()
     }
 
-    /// 临时会话校验：结构校验 + 必须携带过期时间（TTL 语义由 ab-broker 管）。
     pub fn validate_temporary(&self) -> Result<(), ContractError> {
         self.validate()?;
         if self.expires_at.as_deref().unwrap_or("").is_empty() {
             return Err(ContractError::MissingExpiry);
         }
+        if self.scope.is_none() {
+            return Err(ContractError::MissingScope);
+        }
         Ok(())
     }
 
-    /// 复用 SessionRecord 的结构校验（两者会话部分字段一致）。
     fn as_record(&self) -> SessionRecord {
         SessionRecord {
             account_ref: self.account_ref.clone(),
@@ -333,6 +412,7 @@ impl SessionEnvelope {
             payload: self.payload.clone(),
             expires_at: self.expires_at.clone(),
             source: self.source.clone(),
+            client_env: self.client_env.clone(),
         }
     }
 }
@@ -381,6 +461,12 @@ impl ConverterManifest {
         if self.entry.is_empty() {
             return Err(ContractError::EmptyField("entry"));
         }
+        if self.module_sha256.is_empty() {
+            return Err(ContractError::EmptyField("module_sha256"));
+        }
+        if !is_lower_hex(&self.module_sha256, 64) || is_all_zero_hex(&self.module_sha256) {
+            return Err(ContractError::InvalidModuleHash);
+        }
         if self.signature.algorithm != "ed25519" {
             return Err(ContractError::UnsupportedAlgorithm(
                 self.signature.algorithm.clone(),
@@ -389,20 +475,25 @@ impl ConverterManifest {
         if self.signature.signer.is_empty() || self.signature.value.is_empty() {
             return Err(ContractError::EmptyField("signature"));
         }
+        if is_all_zero_hex(&self.signature.value) {
+            return Err(ContractError::PlaceholderSignature);
+        }
         Ok(())
     }
 }
-
-/* ---------------- 测试 ---------------- */
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const MODULE_SHA256: &str = "3f2a9c1d5b7e4088a1c2d3e4f5061728394a5b6c7d8e9f001122334455667788";
+    const SIGNATURE_128: &str = "6f1d0b2a4c8e7395a0b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f6071\
+                                 8899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677";
+
     fn cookie() -> Cookie {
         Cookie {
             name: "sid".into(),
-            value: "abc".into(),
+            value: "abc-secret-cookie".into(),
             domain: Some("github.com".into()),
             path: Some("/".into()),
             secure: Some(true),
@@ -416,6 +507,14 @@ mod tests {
         Source {
             source_type: SourceType::Extension,
             id: "chromium".into(),
+        }
+    }
+
+    fn scope() -> ScopeSpec {
+        ScopeSpec {
+            domain_allowlist: vec!["github.com".into()],
+            read_only: true,
+            single_use: true,
         }
     }
 
@@ -436,6 +535,8 @@ mod tests {
             issued_at: "2026-10-09T00:00:00Z".into(),
             expires_at: None,
             source: source(),
+            scope: None,
+            client_env: None,
         }
     }
 
@@ -481,12 +582,34 @@ mod tests {
     }
 
     #[test]
-    fn temporary_requires_expiry() {
-        let env = envelope();
-        assert_eq!(env.validate_temporary(), Err(ContractError::MissingExpiry));
-        let mut env2 = envelope();
-        env2.expires_at = Some("2026-10-09T01:00:00Z".into());
-        assert!(env2.validate_temporary().is_ok());
+    fn temporary_requires_expiry_and_scope() {
+        assert_eq!(envelope().validate_temporary(), Err(ContractError::MissingExpiry));
+
+        let mut env = envelope();
+        env.expires_at = Some("2026-10-09T01:00:00Z".into());
+        assert_eq!(env.validate_temporary(), Err(ContractError::MissingScope));
+
+        env.scope = Some(scope());
+        assert!(env.validate_temporary().is_ok());
+    }
+
+    #[test]
+    fn scope_and_client_env_roundtrip() {
+        let mut env = envelope();
+        env.scope = Some(scope());
+        env.client_env = Some(ClientEnv {
+            user_agent: "Mozilla/5.0 (Windows NT 10.0)".into(),
+            platform: "windows".into(),
+            device_id: Some("dev-fp-1".into()),
+        });
+        let json = serde_json::to_string(&env).unwrap();
+        let back: SessionEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(env, back);
+        let s = back.scope.unwrap();
+        assert_eq!(s.domain_allowlist, vec!["github.com".to_string()]);
+        assert!(s.read_only);
+        assert!(s.single_use);
+        assert_eq!(back.client_env.unwrap().platform, "windows");
     }
 
     #[test]
@@ -500,6 +623,45 @@ mod tests {
     }
 
     #[test]
+    fn debug_output_redacts_secrets() {
+        let env = envelope();
+        let text = format!("{env:?}");
+        assert!(text.contains("[REDACTED]"));
+        assert!(!text.contains("abc-secret-cookie"));
+
+        let mut cred = CredentialRecord {
+            account_ref: "acc-1".into(),
+            kind: CredentialKind::Totp,
+            username: Some("john".into()),
+            secret: Some("s3cret-value".into()),
+            totp_seed: Some("JBSWY3DPEHPK3PXP".into()),
+            url: None,
+        };
+        let text = format!("{cred:?}");
+        assert!(!text.contains("s3cret-value"));
+        assert!(!text.contains("JBSWY3DPEHPK3PXP"));
+        assert!(text.contains("john"));
+
+        cred.secret = None;
+        cred.totp_seed = None;
+        assert_eq!(
+            format!("{cred:?}"),
+            "CredentialRecord { account_ref: \"acc-1\", kind: Totp, username: Some(\"john\"), \
+             secret: None, totp_seed: None, url: None }"
+        );
+
+        let payload = Payload {
+            token: Some("bearer-token-value".into()),
+            local_storage: BTreeMap::from([("ls_key".to_string(), "ls-secret".to_string())]),
+            ..Payload::default()
+        };
+        let text = format!("{payload:?}");
+        assert!(!text.contains("bearer-token-value"));
+        assert!(!text.contains("ls-secret"));
+        assert!(text.contains("ls_key"));
+    }
+
+    #[test]
     fn manifest_valid_and_rejects_bad_shapes() {
         let m = ConverterManifest {
             id: "qq".into(),
@@ -508,10 +670,11 @@ mod tests {
             level: AccessLevel::C,
             readable_paths: vec!["C:\\Users\\...\\QQ".into()],
             entry: "qq.wasm".into(),
+            module_sha256: MODULE_SHA256.into(),
             signature: Signature {
                 algorithm: "ed25519".into(),
                 signer: "official".into(),
-                value: "aabb".into(),
+                value: SIGNATURE_128.into(),
             },
             min_app_version: None,
         };
@@ -531,6 +694,45 @@ mod tests {
             bad_algo.validate(),
             Err(ContractError::UnsupportedAlgorithm(_))
         ));
+    }
+
+    #[test]
+    fn manifest_rejects_placeholder_signature_and_bad_module_hash() {
+        let m = ConverterManifest {
+            id: "qq".into(),
+            name: "QQ".into(),
+            version: "1.2.0".into(),
+            level: AccessLevel::C,
+            readable_paths: vec!["C:\\Users\\...\\QQ".into()],
+            entry: "qq.wasm".into(),
+            module_sha256: MODULE_SHA256.into(),
+            signature: Signature {
+                algorithm: "ed25519".into(),
+                signer: "official".into(),
+                value: SIGNATURE_128.into(),
+            },
+            min_app_version: None,
+        };
+
+        let mut placeholder = m.clone();
+        placeholder.signature.value = "0".repeat(128);
+        assert_eq!(placeholder.validate(), Err(ContractError::PlaceholderSignature));
+
+        let mut empty_hash = m.clone();
+        empty_hash.module_sha256 = String::new();
+        assert_eq!(empty_hash.validate(), Err(ContractError::EmptyField("module_sha256")));
+
+        let mut bad_hash = m.clone();
+        bad_hash.module_sha256 = "zz".repeat(32);
+        assert_eq!(bad_hash.validate(), Err(ContractError::InvalidModuleHash));
+
+        let mut short_hash = m.clone();
+        short_hash.module_sha256 = "abcd".into();
+        assert_eq!(short_hash.validate(), Err(ContractError::InvalidModuleHash));
+
+        let mut placeholder_hash = m.clone();
+        placeholder_hash.module_sha256 = "0".repeat(64);
+        assert_eq!(placeholder_hash.validate(), Err(ContractError::InvalidModuleHash));
     }
 
     #[test]
@@ -562,8 +764,10 @@ mod tests {
                 },
                 expires_at: None,
                 source: source(),
+                client_env: None,
             }],
             meta: BTreeMap::new(),
+            client_env: None,
         };
         assert!(sa.validate().is_ok());
 

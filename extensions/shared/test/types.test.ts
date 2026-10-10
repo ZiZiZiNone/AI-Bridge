@@ -10,6 +10,8 @@ import { readFileSync } from "node:fs";
 
 import {
   ACCESS_LEVELS,
+  CLIENT_ENV_KEYS,
+  CLIENT_ENV_REQUIRED_KEYS,
   CONVERTER_MANIFEST_KEYS,
   CONVERTER_MANIFEST_REQUIRED_KEYS,
   COOKIE_KEYS,
@@ -19,12 +21,15 @@ import {
   CREDENTIAL_RECORD_REQUIRED_KEYS,
   DATE_TIME_PATTERN,
   ID_PATTERN,
+  MODULE_SHA256_PATTERN,
   PAYLOAD_KEYS,
   PAYLOAD_REQUIRED_KEYS,
   PLAIN_CREDENTIAL_KEYS,
   PLAIN_CREDENTIAL_REQUIRED_KEYS,
   SAME_SITE_VALUES,
   SCHEMA_VERSION,
+  SCOPE_KEYS,
+  SCOPE_REQUIRED_KEYS,
   SESSION_ENVELOPE_KEYS,
   SESSION_ENVELOPE_REQUIRED_KEYS,
   SESSION_KINDS,
@@ -33,6 +38,7 @@ import {
   SIGNATURE_ALGORITHM,
   SIGNATURE_KEYS,
   SIGNATURE_REQUIRED_KEYS,
+  SIGNATURE_VALUE_PATTERN,
   SOURCE_KEYS,
   SOURCE_REQUIRED_KEYS,
   SOURCE_TYPES,
@@ -127,6 +133,10 @@ test("字段集合与 schema properties 逐字段一致（含顺序）", () => {
   assert.deepEqual(PAYLOAD_KEYS, propKeys(at(sessionEnvelope, "properties", "payload")));
   assert.deepEqual(SOURCE_KEYS, propKeys(at(standardAccess, "$defs", "source")));
   assert.deepEqual(SOURCE_KEYS, propKeys(at(sessionEnvelope, "properties", "source")));
+  assert.deepEqual(SCOPE_KEYS, propKeys(at(sessionEnvelope, "properties", "scope")));
+  assert.deepEqual(CLIENT_ENV_KEYS, propKeys(at(sessionEnvelope, "properties", "client_env")));
+  assert.deepEqual(CLIENT_ENV_KEYS, propKeys(at(standardAccess, "properties", "client_env")));
+  assert.deepEqual(CLIENT_ENV_KEYS, propKeys(at(standardAccess, "$defs", "session", "properties", "client_env")));
   assert.deepEqual(CREDENTIAL_RECORD_KEYS, propKeys(at(standardAccess, "$defs", "credential")));
   assert.deepEqual(SESSION_RECORD_KEYS, propKeys(at(standardAccess, "$defs", "session")));
   assert.deepEqual(STANDARD_ACCESS_KEYS, propKeys(standardAccess));
@@ -143,6 +153,10 @@ test("必填集合与 schema required 逐项一致", () => {
   assert.deepEqual(PLAIN_CREDENTIAL_REQUIRED_KEYS, requiredKeys(at(standardAccess, "$defs", "payload", "properties", "credential")));
   assert.deepEqual(PAYLOAD_REQUIRED_KEYS, []);
   assert.deepEqual(SOURCE_REQUIRED_KEYS, requiredKeys(at(standardAccess, "$defs", "source")));
+  assert.deepEqual(SCOPE_REQUIRED_KEYS, requiredKeys(at(sessionEnvelope, "properties", "scope")));
+  assert.deepEqual(CLIENT_ENV_REQUIRED_KEYS, requiredKeys(at(sessionEnvelope, "properties", "client_env")));
+  assert.deepEqual(CLIENT_ENV_REQUIRED_KEYS, requiredKeys(at(standardAccess, "properties", "client_env")));
+  assert.deepEqual(CLIENT_ENV_REQUIRED_KEYS, requiredKeys(at(standardAccess, "$defs", "session", "properties", "client_env")));
   assert.deepEqual(CREDENTIAL_RECORD_REQUIRED_KEYS, requiredKeys(at(standardAccess, "$defs", "credential")));
   assert.deepEqual(SESSION_RECORD_REQUIRED_KEYS, requiredKeys(at(standardAccess, "$defs", "session")));
   assert.deepEqual(STANDARD_ACCESS_REQUIRED_KEYS, requiredKeys(standardAccess));
@@ -160,6 +174,8 @@ test("schema 对象一律 additionalProperties:false（严格解码的依据）"
     ["standard-access/$defs/target", at(standardAccess, "$defs", "target")],
     ["standard-access/$defs/payload", at(standardAccess, "$defs", "payload")],
     ["standard-access/$defs/source", at(standardAccess, "$defs", "source")],
+    ["standard-access/client_env", at(standardAccess, "properties", "client_env")],
+    ["standard-access/$defs/session/client_env", at(standardAccess, "$defs", "session", "properties", "client_env")],
     ["converter-manifest", converterManifest],
     ["converter-manifest/signature", at(converterManifest, "properties", "signature")],
     ["session-envelope", sessionEnvelope],
@@ -168,6 +184,8 @@ test("schema 对象一律 additionalProperties:false（严格解码的依据）"
     ["session-envelope/payload/credential", at(sessionEnvelope, "properties", "payload", "properties", "credential")],
     ["session-envelope/payload/cookies[]", envelopeCookie],
     ["session-envelope/source", at(sessionEnvelope, "properties", "source")],
+    ["session-envelope/scope", at(sessionEnvelope, "properties", "scope")],
+    ["session-envelope/client_env", at(sessionEnvelope, "properties", "client_env")],
   ];
   for (const [name, node] of strictNodes) {
     assert.equal(at(node, "additionalProperties"), false, `${name} 必须 additionalProperties:false`);
@@ -193,6 +211,23 @@ test("pattern 与 schema 原文一致，且正则行为符合声明", () => {
   for (const invalid of ["1.2", "v1.2.0", "1.2.0-beta", ""]) {
     assert.equal(VERSION_PATTERN.test(invalid), false, `应拒绝 ${invalid}`);
   }
+
+  assert.equal(MODULE_SHA256_PATTERN.source, at(converterManifest, "properties", "module_sha256", "pattern"));
+  assert.equal(MODULE_SHA256_PATTERN.source, "^[0-9a-f]{64}$");
+  assert.equal(SIGNATURE_VALUE_PATTERN.source, at(converterManifest, "properties", "signature", "properties", "value", "pattern"));
+  assert.equal(SIGNATURE_VALUE_PATTERN.source, "^[0-9a-f]{128}$");
+
+  for (const valid of ["0".repeat(64), "a".repeat(64), "0123abcdef".repeat(6) + "0123"]) {
+    assert.equal(MODULE_SHA256_PATTERN.test(valid), true, `应接受 ${valid}`);
+  }
+  for (const invalid of ["", "a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64), "中文".repeat(32)]) {
+    assert.equal(MODULE_SHA256_PATTERN.test(invalid), false, `应拒绝 ${invalid}`);
+  }
+  for (const invalid of ["", "a".repeat(127), "a".repeat(129), "A".repeat(128)]) {
+    assert.equal(SIGNATURE_VALUE_PATTERN.test(invalid), false, `应拒绝 ${invalid}`);
+  }
+  // pattern 只锁形状；「全零占位值拒载」是加载方（core）的语义校验，不属本层。
+  assert.equal(SIGNATURE_VALUE_PATTERN.test("0".repeat(128)), true);
 });
 
 test("DATE_TIME_PATTERN 覆盖契约 date-time 形状", () => {

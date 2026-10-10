@@ -52,6 +52,12 @@ export const ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
 /** `converter-manifest.version` 的形状。 */
 export const VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 
+/** `converter-manifest.module_sha256` 的形状（entry 模块字节的 SHA-256，hex 小写）。 */
+export const MODULE_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+/** `converter-manifest.signature.value` 的形状（ed25519 签名值，hex 小写）。 */
+export const SIGNATURE_VALUE_PATTERN = /^[0-9a-f]{128}$/;
+
 /** 契约内全部 date-time 字段的形状（RFC 3339 date-time）。 */
 export const DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
@@ -167,6 +173,61 @@ export type SourceKeysComplete = AssertNever<
   Exclude<keyof Source & string, (typeof SOURCE_KEYS)[number]>
 >;
 
+/**
+ * 临时会话授权范围：AI 的能力上限。临时会话必填（业务强制在 ab-broker，本层只镜像形状）。
+ * 字段与 schema `session-envelope.scope` 完全一致。
+ */
+export interface ScopeSpec {
+  /** 可访问域名白名单；空数组 = 不允许任何 web 目标。 */
+  domain_allowlist: string[];
+  read_only: boolean;
+  single_use: boolean;
+}
+
+export const SCOPE_KEYS = [
+  "domain_allowlist",
+  "read_only",
+  "single_use",
+] as const satisfies readonly (keyof ScopeSpec & string)[];
+
+export const SCOPE_REQUIRED_KEYS = [
+  "domain_allowlist",
+  "read_only",
+  "single_use",
+] as const satisfies readonly (typeof SCOPE_KEYS)[number][];
+
+export type ScopeKeysComplete = AssertNever<
+  Exclude<keyof ScopeSpec & string, (typeof SCOPE_KEYS)[number]>
+>;
+
+/**
+ * 会话捕获环境（UA 绑定）：捕获时记录、扩散随行、注入容器时对齐。
+ * 字段与 schema `session-envelope.client_env` / `standard-access.client_env` /
+ * `$defs.session.client_env` 完全一致。
+ */
+export interface ClientEnv {
+  user_agent: string;
+  /** 平台标识：windows / macos / linux / android / ios / web。 */
+  platform: string;
+  /** 可选设备指纹标识（尽力记录，不承诺可对齐）。 */
+  device_id?: string;
+}
+
+export const CLIENT_ENV_KEYS = [
+  "user_agent",
+  "platform",
+  "device_id",
+] as const satisfies readonly (keyof ClientEnv & string)[];
+
+export const CLIENT_ENV_REQUIRED_KEYS = [
+  "user_agent",
+  "platform",
+] as const satisfies readonly (typeof CLIENT_ENV_KEYS)[number][];
+
+export type ClientEnvKeysComplete = AssertNever<
+  Exclude<keyof ClientEnv & string, (typeof CLIENT_ENV_KEYS)[number]>
+>;
+
 /* ---------------- standard-access.schema.json ---------------- */
 
 export interface CredentialRecord {
@@ -203,6 +264,8 @@ export interface SessionRecord {
   payload: Payload;
   expires_at?: string;
   source: Source;
+  /** 会话捕获环境（UA 绑定），与信封同语义，逐会话记录。 */
+  client_env?: ClientEnv;
 }
 
 export const SESSION_RECORD_KEYS = [
@@ -212,6 +275,7 @@ export const SESSION_RECORD_KEYS = [
   "payload",
   "expires_at",
   "source",
+  "client_env",
 ] as const satisfies readonly (keyof SessionRecord & string)[];
 
 export const SESSION_RECORD_REQUIRED_KEYS = [
@@ -236,6 +300,8 @@ export interface StandardAccess {
   sessions?: SessionRecord[];
   /** 来源自述信息（转换器版本、采集时间等），仅展示用。 */
   meta?: Record<string, unknown>;
+  /** 本次提取的客户端环境（UA 绑定）：随产物记录，注入容器时对齐。 */
+  client_env?: ClientEnv;
 }
 
 export const STANDARD_ACCESS_KEYS = [
@@ -246,6 +312,7 @@ export const STANDARD_ACCESS_KEYS = [
   "credentials",
   "sessions",
   "meta",
+  "client_env",
 ] as const satisfies readonly (keyof StandardAccess & string)[];
 
 export const STANDARD_ACCESS_REQUIRED_KEYS = [
@@ -275,6 +342,10 @@ export interface SessionEnvelope {
   /** 临时会话必填（由核心 validate 校验，TTL 策略在 ab-broker）。 */
   expires_at?: string;
   source: Source;
+  /** 临时会话授权范围：AI 的能力上限。临时会话必填（业务强制在 ab-broker）。 */
+  scope?: ScopeSpec;
+  /** 会话捕获环境（UA 绑定）：捕获时记录、扩散随行、注入容器时对齐。 */
+  client_env?: ClientEnv;
 }
 
 export const SESSION_ENVELOPE_KEYS = [
@@ -286,6 +357,8 @@ export const SESSION_ENVELOPE_KEYS = [
   "issued_at",
   "expires_at",
   "source",
+  "scope",
+  "client_env",
 ] as const satisfies readonly (keyof SessionEnvelope & string)[];
 
 export const SESSION_ENVELOPE_REQUIRED_KEYS = [
@@ -335,6 +408,11 @@ export interface ConverterManifest {
   /** 可读路径声明：沙盒只开放这些路径的只读访问，超出即拒绝。 */
   readable_paths: string[];
   entry: string;
+  /**
+   * entry 模块字节的 SHA-256（hex 小写）。签名覆盖本字段，执行前必须与实际模块字节比对，
+   * 防止「换模块保清单」。
+   */
+  module_sha256: string;
   signature: Signature;
   min_app_version?: string;
 }
@@ -346,6 +424,7 @@ export const CONVERTER_MANIFEST_KEYS = [
   "level",
   "readable_paths",
   "entry",
+  "module_sha256",
   "signature",
   "min_app_version",
 ] as const satisfies readonly (keyof ConverterManifest & string)[];
@@ -357,6 +436,7 @@ export const CONVERTER_MANIFEST_REQUIRED_KEYS = [
   "level",
   "readable_paths",
   "entry",
+  "module_sha256",
   "signature",
 ] as const satisfies readonly (typeof CONVERTER_MANIFEST_KEYS)[number][];
 

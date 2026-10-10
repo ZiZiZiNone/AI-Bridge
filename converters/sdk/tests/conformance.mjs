@@ -219,8 +219,12 @@ await check("readable_paths 每项都能展开为绝对路径且无通配", () =
 if (expectPlaceholder) {
   await check("模板清单必须是未签名占位（防止模板被误当成品发布）", () => {
     assert(
-      /^0{64}$/.test(manifest.signature.value),
-      `模板 signature.value 必须是 64 个 0，当前为 ${manifest.signature.value}`,
+      /^0{128}$/.test(manifest.signature.value),
+      `模板 signature.value 必须是 128 个 0，当前为 ${manifest.signature.value}`,
+    );
+    assert(
+      /^0{64}$/.test(manifest.module_sha256 ?? ""),
+      `模板 module_sha256 必须是 64 个 0，当前为 ${manifest.module_sha256}`,
     );
   });
 }

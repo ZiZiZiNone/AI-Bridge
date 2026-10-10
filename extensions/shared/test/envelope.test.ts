@@ -1,7 +1,7 @@
 /**
  * envelope.ts 实测：SessionEnvelope 编解码 + 结构校验镜像。
  * 重点断言 schema_version 值域、target 必填规则、kind/payload 一致性、额外字段拒绝、
- * cookie 属性在编解码往返中一个不丢。
+ * scope / client_env 新字段的形状校验、cookie 属性在编解码往返中一个不丢。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -71,6 +71,24 @@ function envelopeTextWithout(key: string): string {
   return JSON.stringify(Object.fromEntries(kept));
 }
 
+/** 带 scope 与 client_env 的信封（临时会话形态）。 */
+function scopedEnvelope(): SessionEnvelope {
+  return {
+    ...cookieEnvelope(),
+    expires_at: "2026-10-09T01:00:00Z",
+    scope: {
+      domain_allowlist: ["github.com", "gist.github.com"],
+      read_only: true,
+      single_use: true,
+    },
+    client_env: {
+      user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      platform: "windows",
+      device_id: "dev-1",
+    },
+  };
+}
+
 test("encode → decode 往返：字段顺序与 cookie 属性一个不丢", () => {
   const envelope = cookieEnvelope();
   const text = encodeEnvelope(envelope);
@@ -111,6 +129,72 @@ test("带 expires_at 的信封按 schema 字段顺序编码并保留过期时间
     "source",
   ]);
   assert.equal(decodeEnvelope(text).expires_at, "2026-10-09T01:00:00Z");
+});
+
+test("scope / client_env 往返：按 schema 顺序编码、子字段一个不丢", () => {
+  const envelope = scopedEnvelope();
+  const text = encodeEnvelope(envelope);
+  assert.deepEqual(Object.keys(JSON.parse(text) as Record<string, unknown>), [
+    "schema_version",
+    "account_ref",
+    "target",
+    "kind",
+    "payload",
+    "issued_at",
+    "expires_at",
+    "source",
+    "scope",
+    "client_env",
+  ]);
+
+  const decoded = decodeEnvelope(text);
+  assert.deepEqual(decoded, envelope);
+  assert.deepEqual(decoded.scope, envelope.scope);
+  assert.deepEqual(decoded.client_env, envelope.client_env);
+});
+
+test("解码严格性：scope / client_env 是合法字段，子形状逐项校验", () => {
+  // 新字段合法通过；不带也合法（可选字段，临时会话必填与否属业务语义，在 core 校验）
+  expectOk(validateSessionEnvelope(cookieEnvelope()));
+  expectOk(validateSessionEnvelope(scopedEnvelope()));
+  expectOk(
+    validateSessionEnvelope({
+      ...cookieEnvelope(),
+      scope: { domain_allowlist: [], read_only: false, single_use: false },
+      client_env: { user_agent: "ua", platform: "web" },
+    }),
+  );
+
+  // 拼错 / 未知子字段同样拒绝
+  assert.throws(decodeOf((raw) => {
+    raw["scope"] = { domain_allowlist: [], read_only: true, single_use: true, readonly: true };
+  }), hasCode("unexpected_field"));
+  assert.throws(decodeOf((raw) => {
+    raw["client_env"] = { user_agent: "ua", platform: "web", deviceID: "d" };
+  }), hasCode("unexpected_field"));
+  // 缺必填子字段
+  assert.throws(decodeOf((raw) => {
+    raw["scope"] = { domain_allowlist: [], read_only: true };
+  }), hasCode("missing_field"));
+  assert.throws(decodeOf((raw) => {
+    raw["client_env"] = { user_agent: "ua" };
+  }), hasCode("missing_field"));
+  // 子字段类型逐项校验
+  assert.throws(decodeOf((raw) => {
+    raw["scope"] = { domain_allowlist: "github.com", read_only: true, single_use: true };
+  }), hasCode("invalid_type"));
+  assert.throws(decodeOf((raw) => {
+    raw["scope"] = { domain_allowlist: [1], read_only: true, single_use: true };
+  }), hasCode("invalid_type"));
+  assert.throws(decodeOf((raw) => {
+    raw["scope"] = { domain_allowlist: [], read_only: "yes", single_use: true };
+  }), hasCode("invalid_type"));
+  assert.throws(decodeOf((raw) => {
+    raw["client_env"] = [];
+  }), hasCode("invalid_type"));
+  assert.throws(decodeOf((raw) => {
+    raw["client_env"] = { user_agent: "ua", platform: "web", device_id: 7 };
+  }), hasCode("invalid_type"));
 });
 
 test("schema_version 不是 1.0 一律拒绝", () => {

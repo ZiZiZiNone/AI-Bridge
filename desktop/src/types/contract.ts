@@ -63,6 +63,20 @@ export interface Source {
   id: string;
 }
 
+/** 临时会话授权范围：AI 的能力上限（session-envelope.schema.json scope）。 */
+export interface ScopeSpec {
+  domain_allowlist: string[];
+  read_only: boolean;
+  single_use: boolean;
+}
+
+/** 会话捕获环境（UA 绑定）：捕获时记录、扩散随行、注入容器时对齐。 */
+export interface ClientEnv {
+  user_agent: string;
+  platform: string;
+  device_id?: string;
+}
+
 /* ---------------- StandardAccess（standard-access.schema.json） ---------------- */
 
 export interface CredentialRecord {
@@ -81,6 +95,7 @@ export interface SessionRecord {
   payload: Payload;
   expires_at?: string;
   source: Source;
+  client_env?: ClientEnv;
 }
 
 export interface StandardAccess {
@@ -91,6 +106,7 @@ export interface StandardAccess {
   credentials?: CredentialRecord[];
   sessions?: SessionRecord[];
   meta?: Record<string, unknown>;
+  client_env?: ClientEnv;
 }
 
 /* ---------------- SessionEnvelope（session-envelope.schema.json） ---------------- */
@@ -104,6 +120,8 @@ export interface SessionEnvelope {
   issued_at: string;
   expires_at?: string;
   source: Source;
+  scope?: ScopeSpec;
+  client_env?: ClientEnv;
 }
 
 /* ---------------- ConverterManifest（converter-manifest.schema.json） ---------------- */
@@ -121,6 +139,7 @@ export interface ConverterManifest {
   level: AccessLevel;
   readable_paths: string[];
   entry: string;
+  module_sha256: string;
   signature: Signature;
   min_app_version?: string;
 }

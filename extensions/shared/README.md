@@ -46,7 +46,8 @@ native messaging 桥协议 v1**。零 UI、零宿主依赖，同一份代码可�
      因为金标方向要做时间换算，必须能解析。
   3. `encode` 输出字段顺序固定为 schema 声明顺序，且**不裁剪**空数组（Rust 的 `skip_serializing_if`
      会省略空 `cookies` / `local_storage`）。两者互相可解析，语义一致，仅字节不同。
-- 版本化：`schema_version` 必填、新增字段一律可选。新增字段时必须同步 `types.ts` 的 `*_KEYS`
+- 版本化：`schema_version` 必填；发布后新增字段一律可选，发布前的契约变更走
+  `tests/contract-compat` 基线评审。新增字段时必须同步 `types.ts` 的 `*_KEYS`
   常量——否则 `test/types.test.ts` 立刻失败，且 `*KeysComplete` 断言会让 `tsc` 报错。
 
 ## 4. 用法
@@ -107,7 +108,7 @@ if (message.type === "request" && message.method === "session.inject") {
 ## 5. 运行（本机实测命令）
 
 ```powershell
-# 单测（36 项）
+# 单测（38 项）
 node --test --experimental-test-isolation=none extensions/shared/test/types.test.ts `
   extensions/shared/test/cookie.test.ts extensions/shared/test/envelope.test.ts extensions/shared/test/bridge.test.ts
 # 等价：npm test --prefix extensions/shared

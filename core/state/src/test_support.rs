@@ -145,6 +145,7 @@ pub(crate) fn record_full(
             source_type,
             id: source_id.to_string(),
         },
+        client_env: None,
     }
 }
 

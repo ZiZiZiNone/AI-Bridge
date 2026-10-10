@@ -91,7 +91,8 @@ interface ConverterHost {
 
 // ab-audit：追加式审计（只追加，不删改历史）。
 interface AuditLog {
-    [Throws=CoreError] void record(AuditEvent event);
+    // 审计写入唯一入口，fail-closed：审计写入失败时敏感操作必须拒绝执行。
+    [Throws=CoreError] void record_or_fail(AuditEvent event);
     sequence<AuditEvent> query(AuditFilter filter);
 };
 
@@ -135,7 +136,7 @@ interface Transport {
 // 时钟：注入以便单测与 TTL 判定（core 不自取系统时间）。
 [Trait]
 interface Clock {
-    string now_rfc3339();
+    i64 now_unix_secs();
 };
 
 // 熵源：生成器与密钥派生的随机来源（core 不自取系统随机）。
@@ -203,6 +204,7 @@ dictionary SessionRecord {
     Payload payload;
     string? expires_at;
     Source source;
+    ClientEnv? client_env;
 };
 
 dictionary SessionEnvelope {
@@ -214,6 +216,8 @@ dictionary SessionEnvelope {
     string issued_at;
     string? expires_at;
     Source source;
+    ScopeSpec? scope;
+    ClientEnv? client_env;
 };
 
 dictionary StandardAccess {
@@ -224,6 +228,7 @@ dictionary StandardAccess {
     sequence<CredentialRecord> credentials;
     sequence<SessionRecord> sessions;
     record<string, string> meta;
+    ClientEnv? client_env;
 };
 
 dictionary Signature {
@@ -239,6 +244,7 @@ dictionary ConverterManifest {
     AccessLevel level;
     sequence<string> readable_paths;
     string entry;
+    string module_sha256;
     Signature signature;
     string? min_app_version;
 };
@@ -306,6 +312,13 @@ dictionary ScopeSpec {
     boolean single_use;
 };
 
+// 会话捕获环境（UA 绑定）：捕获时记录、扩散随行、注入容器时对齐；不一致时提示可能触发风控。
+dictionary ClientEnv {
+    string user_agent;
+    string platform;
+    string? device_id;
+};
+
 dictionary IssuedSession {
     string session_id;
     string account_ref;
@@ -330,16 +343,21 @@ dictionary ManifestVerification {
 };
 
 dictionary AuditEvent {
-    string event_id;
-    string occurred_at;
-    string kind;
-    string detail;
+    string who;
+    string when;
+    string? account_ref;
+    string? domain;
+    AuditAction action;
+    AuditResult result;
+    record<string, string> detail;
 };
 
 dictionary AuditFilter {
-    string? kind;
-    string? since;
-    u32? limit;
+    string? who;
+    string? account_ref;
+    string? domain;
+    AuditAction? action;
+    AuditResult? result;
 };
 
 dictionary PeerInfo {
@@ -361,6 +379,8 @@ enum SessionKind { "COOKIE", "TOKEN", "CREDENTIAL" };
 enum TargetKind { "WEB", "APP", "CONTAINER" };
 enum SameSite { "STRICT", "LAX", "NONE" };
 enum SourceType { "EXTENSION", "CONVERTER", "MOBILE", "MANUAL", "SYNC" };
+enum AuditAction { "UNLOCK", "LOCK", "CAPTURE", "INJECT", "FILL", "ISSUE", "RELEASE", "REVOKE", "REVOKE_ALL", "SWEEP", "EXTRACT", "CONVERTER_LOAD", "CONVERTER_REJECT", "PAIR", "SYNC", "VAULT_WRITE", "VAULT_DELETE", "RESTORE", "EXPORT" };
+enum AuditResult { "OK", "DENIED", "FAILED" };
 
 /* ======================= 错误 ======================= */
 
@@ -387,4 +407,7 @@ enum ContractError {
     PayloadMismatch(SessionKind kind, string expected),
     UnsupportedAlgorithm(string algorithm),
     MissingExpiry,
+    MissingScope,
+    PlaceholderSignature,
+    InvalidModuleHash,
 };

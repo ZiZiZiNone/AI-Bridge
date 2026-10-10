@@ -18,7 +18,7 @@
 - 桌面：Tauri 2 + Rust（核心共享，内嵌 MCP server）
 - 浏览器扩展：TypeScript，MV3（Chrome / Edge / Firefox）
 - 移动端：iOS / Android 原生（SwiftUI / Compose）+ Rust 核心经 UniFFI
-- 加密：KDBX4 同构造（Argon2id + AES-256-GCM + HMAC），DPAPI / Windows Hello 作解锁因子
+- 加密：KDBX4 格式级兼容（生态工具可开，灾备逃生），内部 Argon2id + AES-256-GCM；DPAPI / Windows Hello 作解锁因子
 
 ## 仓库结构
 

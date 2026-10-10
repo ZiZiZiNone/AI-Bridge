@@ -1,7 +1,7 @@
 //! 单元测试：四个必需场景（验签失败拒载 / 等级裁剪正确 / 路径越界拒绝 / 合法加载全链）
 //! 全部用 mock 实现覆盖——本 crate 不引密码学库，也不引 WASM 运行时。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ab_contract::{AccessLevel, ConverterManifest, StandardAccess};
@@ -24,6 +24,9 @@ const ACCESS_FULL: &str = include_str!(concat!(
     "/tests/fixtures/standard_access_full.json"
 ));
 
+/// 加载时喂给验签 mock 的"模块字节"（与 manifest.module_sha256 的真伪无关——验签是 mock）。
+const FAKE_MODULE: &[u8] = b"fake-wasm-module-bytes";
+
 /// 清单声明路径的子路径（白名单内）。
 const IN_SCOPE_PATH: &str = "C:\\Users\\me\\AppData\\Roaming\\QQ\\nt_data\\cookies.db";
 /// 白名单外的路径（系统凭据库）。
@@ -35,7 +38,7 @@ const DECLARED_ROOT: &str = "C:\\Users\\me\\AppData\\Roaming\\QQ";
 
 /// 验签 mock：按预设结论返回，并记录调用次数。
 struct MockVerifier {
-    verdict: Result<(), String>,
+    verdict: Result<(), VerifyError>,
     calls: Rc<Cell<usize>>,
 }
 
@@ -47,9 +50,9 @@ impl MockVerifier {
         }
     }
 
-    fn rejecting(reason: &str) -> Self {
+    fn rejecting(err: VerifyError) -> Self {
         Self {
-            verdict: Err(reason.to_string()),
+            verdict: Err(err),
             calls: Rc::new(Cell::new(0)),
         }
     }
@@ -67,17 +70,19 @@ impl MockVerifier {
 }
 
 impl SignatureVerifier for MockVerifier {
-    fn verify(&self, _manifest: &ConverterManifest) -> Result<(), VerifyError> {
+    fn verify(&self, _manifest: &ConverterManifest, _module: &[u8]) -> Result<(), VerifyError> {
         self.calls.set(self.calls.get() + 1);
-        self.verdict.clone().map_err(VerifyError::new)
+        self.verdict
     }
 }
 
-/// 沙盒 mock：可声明要读的路径（经守卫判定）、可指定输出、可指定失败。
+/// 沙盒 mock：可声明要读的路径（经守卫判定）、可指定输出、可指定失败，
+/// 并可捕获运行器收到的模块字节（验证"验签的即执行的"）。
 struct MockRunner {
     requested_path: Option<String>,
     output: Option<StandardAccess>,
     failure: Option<String>,
+    captured_module: Option<Rc<RefCell<Vec<u8>>>>,
 }
 
 impl MockRunner {
@@ -86,6 +91,7 @@ impl MockRunner {
             requested_path: None,
             output: None,
             failure: None,
+            captured_module: None,
         }
     }
 
@@ -109,10 +115,20 @@ impl MockRunner {
             ..Self::new()
         }
     }
+
+    fn capturing_module(into: Rc<RefCell<Vec<u8>>>) -> Self {
+        Self {
+            captured_module: Some(into),
+            ..Self::new()
+        }
+    }
 }
 
 impl SandboxRunner for MockRunner {
     fn run(&self, request: &SandboxRequest<'_>) -> Result<StandardAccess, SandboxError> {
+        if let Some(into) = &self.captured_module {
+            *into.borrow_mut() = request.module.to_vec();
+        }
         if let Some(path) = &self.requested_path {
             // 与真实运行器同一路径：先经守卫取得路径，越界即失败退出。
             request.guard.resolve(path)?;
@@ -149,9 +165,12 @@ fn manifest_json_with_level(level: &str) -> String {
 fn legal_load_and_extract_full_chain() {
     let host = accepting_host(MockRunner::requesting(IN_SCOPE_PATH));
 
-    let converter = host.load(MANIFEST_OK).expect("合法清单应加载成功");
+    let converter = host
+        .load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
     assert_eq!(converter.manifest().id, "qq");
     assert_eq!(converter.manifest().level, AccessLevel::C);
+    assert_eq!(converter.module(), FAKE_MODULE, "验签时的字节即留存的字节");
 
     let access = host
         .run_extract(&converter, AccessLevel::C)
@@ -165,13 +184,29 @@ fn legal_load_and_extract_full_chain() {
 }
 
 #[test]
+fn verified_module_bytes_reach_runner_unchanged() {
+    // 验签的字节必须原样到达运行器，中途不回盘、不换文件。
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let host = accepting_host(MockRunner::capturing_module(Rc::clone(&seen)));
+
+    let converter = host
+        .load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
+    host.run_extract(&converter, AccessLevel::C)
+        .expect("执行应成功");
+    assert_eq!(*seen.borrow(), FAKE_MODULE.to_vec(), "运行器执行的就是验签那份字节");
+}
+
+#[test]
 fn verification_runs_once_per_load() {
     let (verifier, calls) = MockVerifier::accepting_counted();
     let host = ConverterHost::new(verifier, MockRunner::new());
 
-    host.load(MANIFEST_OK).expect("合法清单应加载成功");
+    host.load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
     assert_eq!(calls.get(), 1);
-    host.load(MANIFEST_OK).expect("合法清单应加载成功");
+    host.load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
     assert_eq!(calls.get(), 2);
 }
 
@@ -180,13 +215,28 @@ fn verification_runs_once_per_load() {
 #[test]
 fn failed_signature_rejects_load() {
     let host = ConverterHost::new(
-        MockVerifier::rejecting("签名与官方公钥不匹配"),
+        MockVerifier::rejecting(VerifyError::BadSignature),
         MockRunner::new(),
     );
     assert_eq!(
-        host.load(MANIFEST_OK),
+        host.load(MANIFEST_OK, FAKE_MODULE),
         Err(ConverterError::SignatureRejected(
-            "签名与官方公钥不匹配".to_string()
+            VerifyError::BadSignature
+        ))
+    );
+}
+
+#[test]
+fn module_hash_mismatch_rejects_load() {
+    // 模块字节与 module_sha256 不符必须拒载。
+    let host = ConverterHost::new(
+        MockVerifier::rejecting(VerifyError::ModuleHashMismatch),
+        MockRunner::new(),
+    );
+    assert_eq!(
+        host.load(MANIFEST_OK, FAKE_MODULE),
+        Err(ConverterError::SignatureRejected(
+            VerifyError::ModuleHashMismatch
         ))
     );
 }
@@ -197,13 +247,13 @@ fn invalid_manifest_rejected_before_verification() {
     let host = ConverterHost::new(verifier, MockRunner::new());
 
     assert!(matches!(
-        host.load(MANIFEST_INVALID),
+        host.load(MANIFEST_INVALID, FAKE_MODULE),
         Err(ConverterError::Contract(_))
     ));
     assert_eq!(calls.get(), 0, "结构校验失败时不得消耗验签能力");
 
     assert!(matches!(
-        host.load("{ not json"),
+        host.load("{ not json", FAKE_MODULE),
         Err(ConverterError::InvalidManifest(_))
     ));
     assert_eq!(calls.get(), 0);
@@ -214,7 +264,9 @@ fn invalid_manifest_rejected_before_verification() {
 #[test]
 fn level_a_keeps_only_meta_and_launch_info() {
     let host = accepting_host(MockRunner::new());
-    let converter = host.load(MANIFEST_OK).expect("合法清单应加载成功");
+    let converter = host
+        .load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
 
     let access = host
         .run_extract(&converter, AccessLevel::A)
@@ -230,7 +282,9 @@ fn level_a_keeps_only_meta_and_launch_info() {
 #[test]
 fn level_b_keeps_only_credentials() {
     let host = accepting_host(MockRunner::new());
-    let converter = host.load(MANIFEST_OK).expect("合法清单应加载成功");
+    let converter = host
+        .load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
 
     let access = host
         .run_extract(&converter, AccessLevel::B)
@@ -244,7 +298,9 @@ fn level_b_keeps_only_credentials() {
 #[test]
 fn level_c_keeps_sessions() {
     let host = accepting_host(MockRunner::new());
-    let converter = host.load(MANIFEST_OK).expect("合法清单应加载成功");
+    let converter = host
+        .load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
 
     let access = host
         .run_extract(&converter, AccessLevel::C)
@@ -258,7 +314,9 @@ fn level_c_keeps_sessions() {
 fn manifest_capability_narrows_requested_level() {
     let host = accepting_host(MockRunner::new());
     let a_manifest = manifest_json_with_level("a");
-    let converter = host.load(&a_manifest).expect("合法清单应加载成功");
+    let converter = host
+        .load(&a_manifest, FAKE_MODULE)
+        .expect("合法清单应加载成功");
     assert_eq!(converter.manifest().level, AccessLevel::A);
 
     let access = host
@@ -315,7 +373,9 @@ fn path_outside_scope_rejected() {
 #[test]
 fn sandbox_path_violation_aborts_extract() {
     let host = accepting_host(MockRunner::requesting(OUT_OF_SCOPE_PATH));
-    let converter = host.load(MANIFEST_OK).expect("合法清单应加载成功");
+    let converter = host
+        .load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
 
     assert_eq!(
         host.run_extract(&converter, AccessLevel::C),
@@ -330,7 +390,9 @@ fn sandbox_path_violation_aborts_extract() {
 #[test]
 fn sandbox_failure_is_reported() {
     let host = accepting_host(MockRunner::failing("wasm 陷阱：越界内存访问"));
-    let converter = host.load(MANIFEST_OK).expect("合法清单应加载成功");
+    let converter = host
+        .load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
 
     assert_eq!(
         host.run_extract(&converter, AccessLevel::C),
@@ -362,7 +424,9 @@ fn malformed_sandbox_output_rejected_by_contract() {
     .expect("反序列化本身应成功：问题在 kind 与 payload 的一致性");
 
     let host = accepting_host(MockRunner::returning(broken));
-    let converter = host.load(MANIFEST_OK).expect("合法清单应加载成功");
+    let converter = host
+        .load(MANIFEST_OK, FAKE_MODULE)
+        .expect("合法清单应加载成功");
 
     assert!(matches!(
         host.run_extract(&converter, AccessLevel::C),

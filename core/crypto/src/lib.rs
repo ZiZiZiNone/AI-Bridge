@@ -1,18 +1,11 @@
-//! `ab-crypto` —— 密码学原语封装：**全仓唯一允许引入密码学依赖的 crate**。
+//! `ab-crypto` —— 密码学原语封装；全仓唯一允许引入密码学依赖的 crate。
 //!
-//! 职责（`docs/架构与契约.md` §2）：Argon2id 密钥派生 / AES-256-GCM 封拆 /
-//! HMAC-SHA256 签验 / HKDF-SHA256 域分离 / Ed25519 签验 / X25519 协商 / 随机数。
-//! 禁止：业务语义、文件 IO、网络。
-//!
-//! 硬规则（审查 F5/F7/F8/F9/F12 落点）：
-//! - `#![forbid(unsafe_code)]`；非测试代码禁止 `unwrap/expect/panic!`；
-//! - MAC/签名/摘要比较一律走常数时间路径（`subtle` 或 `Mac::verify_slice`），禁止 `==`；
-//! - 秘密材料（口令/派生密钥/明文/私钥）一律 `Zeroizing` 承载；
-//! - KDF 参数集中定义并强制下限，**降级参数一律拒绝**（防"弱参数文件"攻击）；
-//! - AES-GCM nonce = 96-bit 随机，来源为注入的 [`Entropy`]（永不硬编码、永不持久化计数器）。
+//! 硬规则：`forbid(unsafe_code)`；非测试代码禁 `unwrap/expect/panic!`；
+//! MAC/签名/摘要比较走常数时间路径；秘密材料一律 `Zeroizing`；
+//! KDF 参数强制下限，降级一律拒绝；AES-GCM nonce 96-bit 随机（注入熵源）。
 #![forbid(unsafe_code)]
 
-use aes_gcm::aead::{Aead, KeyInit, Payload as AeadPayload};
+use aes_gcm::aead::{Aead, Payload as AeadPayload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use ed25519_dalek::{Signer, Signature, SigningKey, VerifyingKey};
@@ -25,9 +18,7 @@ use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/* ---------------- 错误 ---------------- */
-
-/// 密码学错误。`Display` 只输出固定文案：**任何密钥/明文/密文材料不进错误信息**（F8）。
+/// `Display` 只输出固定文案：密钥/明文/密文材料不进错误信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CryptoError {
     EntropyFailed,
@@ -60,14 +51,11 @@ impl std::fmt::Display for CryptoError {
 
 impl std::error::Error for CryptoError {}
 
-/* ---------------- 随机源（注入） ---------------- */
-
-/// 熵源注入点：core 不自取系统随机，由宿主实现（Windows = BCryptGenRandom）。
+/// 熵源注入点：core 不自取系统随机。
 pub trait Entropy: Send + Sync {
     fn fill(&self, out: &mut [u8]) -> Result<(), CryptoError>;
 }
 
-/// 默认熵源（`getrandom`）。宿主可用平台实现替换。
 pub struct OsEntropy;
 
 impl Entropy for OsEntropy {
@@ -76,21 +64,14 @@ impl Entropy for OsEntropy {
     }
 }
 
-/// 生成随机字节。
 pub fn random_bytes(entropy: &dyn Entropy, out: &mut [u8]) -> Result<(), CryptoError> {
     entropy.fill(out)
 }
 
-/* ---------------- KDF（Argon2id，参数钉死 + 降级拒绝） ---------------- */
-
-/// Argon2id 参数剖面（**全仓唯一来源**，不许各处散写）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KdfParams {
-    /// 内存成本（KiB）。基线 64 MiB。
     pub m_kib: u32,
-    /// 时间成本。基线 3。
     pub t: u32,
-    /// 并行度。基线 1..=4。
     pub p: u32,
 }
 
@@ -101,11 +82,11 @@ impl Default for KdfParams {
 }
 
 impl KdfParams {
-    pub const MIN_M_KIB: u32 = 65536; // 64 MiB
+    pub const MIN_M_KIB: u32 = 65536;
     pub const MIN_T: u32 = 3;
     pub const MAX_P: u32 = 4;
 
-    /// 低于基线一律拒绝（F6：文件头里的 KDF 参数是攻击者可控输入，不"尽力解锁"）。
+    /// 文件头里的 KDF 参数是攻击者可控输入，低于基线直接拒绝，不「尽力解锁」。
     pub fn validated(self) -> Result<Self, CryptoError> {
         if self.m_kib < Self::MIN_M_KIB || self.t < Self::MIN_T || self.p == 0 || self.p > Self::MAX_P {
             return Err(CryptoError::ParamsBelowBaseline);
@@ -114,7 +95,7 @@ impl KdfParams {
     }
 }
 
-/// 派生 32 字节密钥（Argon2id）。口令不做任何规范化（原始字节），调用方自行统一编码。
+/// Argon2id 派生 32 字节密钥。口令不做规范化（原始字节），编码由调用方统一。
 pub fn derive(
     password: &[u8],
     salt: &[u8],
@@ -134,22 +115,14 @@ pub fn derive(
     Ok(out)
 }
 
-/* ---------------- HKDF 域分离 ---------------- */
-
-/// 域分离标签（**全仓唯一来源**）：不同用途永远派生不出相同密钥。
+/// 域分离标签：全仓唯一来源，不同用途永不派生出相同密钥。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomainLabel {
-    /// 解锁库文件的内层密钥。
     VaultUnlock,
-    /// 条目级封印。
     ItemSeal,
-    /// 构造级 MAC（KDBX4 头部/内层完整性）。
     Mac,
-    /// 跨设备配对。
     SyncPair,
-    /// 离线传送包（A8）。
     RecoveryPack,
-    /// 临时凭证派生。
     BrokerToken,
 }
 
@@ -166,7 +139,6 @@ impl DomainLabel {
     }
 }
 
-/// HKDF-SHA256 域分离派生 32 字节。
 pub fn derive_domain(
     ikm: &[u8],
     salt: Option<&[u8]>,
@@ -179,9 +151,7 @@ pub fn derive_domain(
     Ok(out)
 }
 
-/* ---------------- AEAD（AES-256-GCM） ---------------- */
-
-/// 密封结果：96-bit 随机 nonce + 密文（认证标签内含）。
+/// 96-bit 随机 nonce + 密文（认证标签内含）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sealed {
     pub nonce: [u8; 12],
@@ -189,10 +159,9 @@ pub struct Sealed {
 }
 
 fn aead_key(key: &[u8; 32]) -> Aes256Gcm {
-    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key))
+    <Aes256Gcm as aes_gcm::aead::KeyInit>::new(Key::<Aes256Gcm>::from_slice(key))
 }
 
-/// 封装：生成随机 nonce（注入熵源）后 AES-256-GCM 加密；AAD 参与认证。
 pub fn seal(
     entropy: &dyn Entropy,
     key: &[u8; 32],
@@ -202,7 +171,7 @@ pub fn seal(
     let mut nonce_bytes = [0u8; 12];
     entropy.fill(&mut nonce_bytes)?;
     let cipher = aead_key(key);
-    let nonce = Nonce::from_slice(&nonce_bytes); // 长度已由数组类型保证
+    let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(
             nonce,
@@ -212,7 +181,7 @@ pub fn seal(
     Ok(Sealed { nonce: nonce_bytes, ciphertext })
 }
 
-/// 拆封：认证失败（篡改/错钥/错 AAD）一律 [`CryptoError::AuthenticationFailed`]。
+/// 认证失败（篡改/错钥/错 AAD）一律 [`CryptoError::AuthenticationFailed`]。
 pub fn open(
     key: &[u8; 32],
     aad: &[u8],
@@ -229,9 +198,6 @@ pub fn open(
     Ok(Zeroizing::new(plaintext))
 }
 
-/* ---------------- HMAC-SHA256 ---------------- */
-
-/// HMAC 签名（32 字节标签）。
 pub fn hmac_sign(key: &[u8], message: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength)?;
     mac.update(message);
@@ -241,35 +207,31 @@ pub fn hmac_sign(key: &[u8], message: &[u8]) -> Result<[u8; 32], CryptoError> {
     Ok(out)
 }
 
-/// HMAC 验证（常数时间；失败统一返回 [`CryptoError::InvalidSignature`]）。
+/// 常数时间验证；失败统一 [`CryptoError::InvalidSignature`]。
 pub fn hmac_verify(key: &[u8], message: &[u8], tag: &[u8; 32]) -> Result<(), CryptoError> {
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength)?;
     mac.update(message);
     mac.verify_slice(tag).map_err(|_| CryptoError::InvalidSignature)
 }
 
-/// 常数时间字节比较（供上层比较令牌/摘要时统一使用，禁止用 `==`）。
+/// 常数时间比较；禁止用 `==` 比较秘密。
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-/* ---------------- Ed25519 签验 ---------------- */
-
-/// 生成签名密钥对（私钥 `Zeroizing` 承载）。
 pub fn ed25519_keypair(entropy: &dyn Entropy) -> Result<(Zeroizing<[u8; 32]>, [u8; 32]), CryptoError> {
     let mut sk = Zeroizing::new([0u8; 32]);
     entropy.fill(sk.as_mut())?;
-    let signing = SigningKey::from_bytes(&*sk);
+    let signing = SigningKey::from_bytes(&sk);
     Ok((sk, signing.verifying_key().to_bytes()))
 }
 
-/// 签名（私钥仅作字节传入，函数内不落明文副本）。
 pub fn ed25519_sign(secret_key: &[u8; 32], message: &[u8]) -> [u8; 64] {
     let signing = SigningKey::from_bytes(secret_key);
     signing.sign(message).to_bytes()
 }
 
-/// 验签（`verify_strict`，失败统一 [`CryptoError::InvalidSignature`]）。
+/// `verify_strict`；失败统一 [`CryptoError::InvalidSignature`]。
 pub fn ed25519_verify(
     public_key: &[u8; 32],
     message: &[u8],
@@ -281,9 +243,6 @@ pub fn ed25519_verify(
         .map_err(|_| CryptoError::InvalidSignature)
 }
 
-/* ---------------- X25519 ---------------- */
-
-/// 生成 X25519 密钥对。
 pub fn x25519_keypair(entropy: &dyn Entropy) -> Result<(Zeroizing<[u8; 32]>, [u8; 32]), CryptoError> {
     let mut sk = Zeroizing::new([0u8; 32]);
     entropy.fill(sk.as_mut())?;
@@ -292,7 +251,7 @@ pub fn x25519_keypair(entropy: &dyn Entropy) -> Result<(Zeroizing<[u8; 32]>, [u8
     Ok((sk, public.to_bytes()))
 }
 
-/// Diffie-Hellman 协商（共享秘密 `Zeroizing` 承载）。
+/// 共享秘密 `Zeroizing` 承载。
 pub fn x25519_dh(
     secret_key: &[u8; 32],
     peer_public: &[u8; 32],
@@ -303,7 +262,7 @@ pub fn x25519_dh(
     Ok(Zeroizing::new(shared.to_bytes()))
 }
 
-/// SHA-256 摘要（供签名 canonical payload 等公开数据使用；不用于秘密比较）。
+/// 公开数据用；不用于秘密比较。
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -314,7 +273,6 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
 
-    /// 可复现测试熵源：确定性字节流（仅测试用）。
     struct TestEntropy(u8);
     impl Entropy for TestEntropy {
         fn fill(&self, out: &mut [u8]) -> Result<(), CryptoError> {
@@ -374,9 +332,10 @@ mod tests {
     fn seal_open_roundtrip() {
         let entropy = TestEntropy(1);
         let key = [3u8; 32];
-        let sealed = seal(&entropy, &key, b"aad", b"秘密明文").expect("封印失败");
+        let msg = "秘密明文";
+        let sealed = seal(&entropy, &key, b"aad", msg.as_bytes()).expect("封印失败");
         let plain = open(&key, b"aad", &sealed).expect("拆封失败");
-        assert_eq!(plain.as_ref(), b"秘密明文");
+        assert_eq!(plain.as_slice(), msg.as_bytes());
     }
 
     #[test]
@@ -418,7 +377,7 @@ mod tests {
     fn ed25519_sign_verify_and_tamper() {
         let entropy = TestEntropy(3);
         let (sk, pk) = ed25519_keypair(&entropy).expect("密钥生成失败");
-        let sig = ed25519_sign(sk.as_ref(), b"payload");
+        let sig = ed25519_sign(&sk, b"payload");
         assert!(ed25519_verify(&pk, b"payload", &sig).is_ok());
         let mut bad_sig = sig;
         bad_sig[0] ^= 0x01;
@@ -432,16 +391,16 @@ mod tests {
         let e2 = TestEntropy(22);
         let (sk1, pk1) = x25519_keypair(&e1).expect("密钥生成失败");
         let (sk2, pk2) = x25519_keypair(&e2).expect("密钥生成失败");
-        let s1 = x25519_dh(sk1.as_ref(), &pk2).expect("协商失败");
-        let s2 = x25519_dh(sk2.as_ref(), &pk1).expect("协商失败");
+        let s1 = x25519_dh(&sk1, &pk2).expect("协商失败");
+        let s2 = x25519_dh(&sk2, &pk1).expect("协商失败");
         assert_eq!(s1.as_ref(), s2.as_ref());
     }
 
     #[test]
     fn garbage_inputs_error_not_panic() {
-        let _ = hmac_verify(b"", b"", &[0u8; 32]); // 空钥合法：返回 Result、不 panic
+        let _ = hmac_verify(b"", b"", &[0u8; 32]);
         let mut odd_pk = [0u8; 32];
         odd_pk[31] = 0xff;
-        let _ = ed25519_verify(&odd_pk, b"", &[0u8; 64]); // 非法/边缘公钥：返回 Result、不 panic
+        let _ = ed25519_verify(&odd_pk, b"", &[0u8; 64]);
     }
 }

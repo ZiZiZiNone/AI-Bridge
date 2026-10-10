@@ -15,9 +15,11 @@
  * - 不校验 date-time 的 format（与 ab-contract 一致，format 在 JSON Schema 里是断言而非结构）。
  */
 import type {
+  ClientEnv,
   Cookie,
   Payload,
   PlainCredential,
+  ScopeSpec,
   SessionEnvelope,
   SessionKind,
   SessionRecord,
@@ -25,6 +27,8 @@ import type {
   Target,
 } from "./types.ts";
 import {
+  CLIENT_ENV_KEYS,
+  CLIENT_ENV_REQUIRED_KEYS,
   COOKIE_KEYS,
   COOKIE_REQUIRED_KEYS,
   PAYLOAD_KEYS,
@@ -33,6 +37,8 @@ import {
   PLAIN_CREDENTIAL_REQUIRED_KEYS,
   SAME_SITE_VALUES,
   SCHEMA_VERSION,
+  SCOPE_KEYS,
+  SCOPE_REQUIRED_KEYS,
   SESSION_ENVELOPE_KEYS,
   SESSION_ENVELOPE_REQUIRED_KEYS,
   SESSION_KINDS,
@@ -289,6 +295,55 @@ function parseSource(value: unknown, path: string): Parsed<Source> {
   return { ok: true, value: { type: type.value, id: id.value } };
 }
 
+/** 只做形状校验：scope 的**业务强制**（授权、TTL）在 ab-broker，不在本层。 */
+function parseScope(value: unknown, path: string): Parsed<ScopeSpec> {
+  if (!isPlainObject(value)) return invalidType(path, "scope 应为对象");
+  const shape = checkShape(value, path, SCOPE_KEYS, SCOPE_REQUIRED_KEYS);
+  if (shape !== undefined) return { ok: false, error: shape };
+
+  const allowlistPath = childPath(path, "domain_allowlist");
+  if (!Array.isArray(value.domain_allowlist)) return invalidType(allowlistPath, "应为数组");
+  const domainAllowlist: string[] = [];
+  for (let index = 0; index < value.domain_allowlist.length; index += 1) {
+    const parsed = parseString(value.domain_allowlist[index], `${allowlistPath}[${index}]`);
+    if (!parsed.ok) return parsed;
+    domainAllowlist.push(parsed.value);
+  }
+  const readOnly = parseBoolean(value.read_only, childPath(path, "read_only"));
+  if (!readOnly.ok) return readOnly;
+  const singleUse = parseBoolean(value.single_use, childPath(path, "single_use"));
+  if (!singleUse.ok) return singleUse;
+
+  return {
+    ok: true,
+    value: {
+      domain_allowlist: domainAllowlist,
+      read_only: readOnly.value,
+      single_use: singleUse.value,
+    },
+  };
+}
+
+function parseClientEnv(value: unknown, path: string): Parsed<ClientEnv> {
+  if (!isPlainObject(value)) return invalidType(path, "client_env 应为对象");
+  const shape = checkShape(value, path, CLIENT_ENV_KEYS, CLIENT_ENV_REQUIRED_KEYS);
+  if (shape !== undefined) return { ok: false, error: shape };
+
+  const userAgent = parseString(value.user_agent, childPath(path, "user_agent"));
+  if (!userAgent.ok) return userAgent;
+  const platform = parseString(value.platform, childPath(path, "platform"));
+  if (!platform.ok) return platform;
+  const clientEnv: ClientEnv = { user_agent: userAgent.value, platform: platform.value };
+
+  if (value.device_id !== undefined) {
+    const parsed = parseString(value.device_id, childPath(path, "device_id"));
+    if (!parsed.ok) return parsed;
+    clientEnv.device_id = parsed.value;
+  }
+
+  return { ok: true, value: clientEnv };
+}
+
 /** 按 session-envelope schema 解析信封（不做 schema_version 值域与 target/payload 语义判断）。 */
 function parseSessionEnvelope(value: unknown): Parsed<SessionEnvelope> {
   if (!isPlainObject(value)) return invalidType("$", "SessionEnvelope 应为对象");
@@ -317,6 +372,20 @@ function parseSessionEnvelope(value: unknown): Parsed<SessionEnvelope> {
     expiresAtText = expiresAt.value;
   }
 
+  let scope: ScopeSpec | undefined;
+  if (value.scope !== undefined) {
+    const parsed = parseScope(value.scope, "$.scope");
+    if (!parsed.ok) return parsed;
+    scope = parsed.value;
+  }
+
+  let clientEnv: ClientEnv | undefined;
+  if (value.client_env !== undefined) {
+    const parsed = parseClientEnv(value.client_env, "$.client_env");
+    if (!parsed.ok) return parsed;
+    clientEnv = parsed.value;
+  }
+
   // 字段插入顺序 = schema 声明顺序，encode 输出因此稳定可对账
   const envelope: SessionEnvelope = {
     schema_version: schemaVersion.value,
@@ -327,6 +396,8 @@ function parseSessionEnvelope(value: unknown): Parsed<SessionEnvelope> {
     issued_at: issuedAt.value,
     ...(expiresAtText === undefined ? {} : { expires_at: expiresAtText }),
     source: source.value,
+    ...(scope === undefined ? {} : { scope }),
+    ...(clientEnv === undefined ? {} : { client_env: clientEnv }),
   };
 
   return { ok: true, value: envelope };
