@@ -6,8 +6,9 @@ description = "UniFFI 绑定层：mobile/ffi/aibridge.udl 的机械镜像（接�
 
 [lib]
 name = "ab_ffi"
-# cdylib 供移动端静态/动态库链接；rlib 供 Rust 侧测试与下游引用。
-crate-type = ["cdylib", "rlib"]
+# cdylib 供 Android 动态链接；staticlib 供 iOS 静态链接（mobile/ios/README.md 生成步骤）；
+# rlib 供 Rust 侧测试与下游引用。
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [[bin]]
 name = "uniffi-bindgen"

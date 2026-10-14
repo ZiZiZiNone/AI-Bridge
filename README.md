@@ -50,4 +50,8 @@ tools/ tests/
 
 ## 状态
 
-结构设计已定稿（2026），代码实现未开工。命名：项目 **AI-Bridge**，代码标识 `aibridge`。
+命名：项目 **AI-Bridge**，代码标识 `aibridge`。
+
+**实现进度（2026-10-12 时点快照）**：契约层三 schema + core 九 crate（ab-contract/crypto/vault/state/broker/audit/sync/mcp/converter-host，cargo test 全绿）+ ab-ffi（UniFFI 镜像，Kotlin/Swift 绑定已生成）已落地；转换器 SDK + qq 首接（占位签名，发布链拒载属设计内）；桌面 Tauri 2 宿主已接线 core（47 命令面）；浏览器扩展 chromium/firefox（MV3）；移动端 android（Compose + FFI 接线）与 iOS（SwiftUI 全套，无 Xcode 未编译）。测试基线：core ~144 + tests/ 四套 + desktop 63 + 扩展 38 + qq 管线 30 项。验收一键入口 `tools/verify-all.ps1`。安全模型 §10 状态表为逐项口径。
+
+> 早期版本曾记「代码实现未开工」——该状态已过时，实现进展以本节 + `docs/安全模型.md` §10 为准。
