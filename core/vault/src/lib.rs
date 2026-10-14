@@ -72,6 +72,10 @@ pub struct Entry {
     pub totp_seed: Option<String>,
     pub url: Option<String>,
     pub note: Option<String>,
+    /// A1.1 标签（空即省略，不落空字段）。
+    pub tags: Vec<String>,
+    /// A1.2 收藏。
+    pub favorite: bool,
 }
 
 impl fmt::Debug for Entry {
@@ -86,6 +90,8 @@ impl fmt::Debug for Entry {
             .field("totp_seed", &self.totp_seed.as_deref().map(|_| REDACTED))
             .field("url", &self.url)
             .field("note", &self.note.as_deref().map(|_| REDACTED))
+            .field("tags", &self.tags)
+            .field("favorite", &self.favorite)
             .finish()
     }
 }
@@ -109,6 +115,8 @@ impl Entry {
             totp_seed: None,
             url: None,
             note: None,
+            tags: Vec::new(),
+            favorite: false,
         })
     }
 }
@@ -121,11 +129,130 @@ pub struct Group {
     pub groups: Vec<Group>,
 }
 
+/// A4.2 身份档案：一组默认账号（account_ref）的集合，整组切换。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityProfile {
+    pub name: String,
+    pub account_refs: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Vault {
     pub name: String,
     pub root: Group,
     pub recycle_bin: [u8; 16],
+    /// A4.2 身份档案集合（随库持久化）。
+    pub profiles: Vec<IdentityProfile>,
+    /// 当前生效档案名（None = 未启用档案）。
+    pub active_profile: Option<String>,
+}
+
+impl Vault {
+    /// 新增/更新同名档案。
+    pub fn set_profile(&mut self, profile: IdentityProfile) {
+        match self.profiles.iter_mut().find(|p| p.name == profile.name) {
+            Some(existing) => *existing = profile,
+            None => self.profiles.push(profile),
+        }
+    }
+
+    /// 删除档案；若为生效档案则一并清除生效标记。返回是否删到。
+    pub fn remove_profile(&mut self, name: &str) -> bool {
+        let before = self.profiles.len();
+        self.profiles.retain(|p| p.name != name);
+        if self.active_profile.as_deref() == Some(name) {
+            self.active_profile = None;
+        }
+        self.profiles.len() != before
+    }
+
+    /// 整组切换：激活指定档案（须已存在）；None = 取消启用。
+    pub fn set_active_profile(&mut self, name: Option<&str>) -> Result<(), VaultError> {
+        match name {
+            None => {
+                self.active_profile = None;
+                Ok(())
+            }
+            Some(name) => {
+                if self.profiles.iter().any(|p| p.name == name) {
+                    self.active_profile = Some(name.to_string());
+                    Ok(())
+                } else {
+                    Err(VaultError::NotFound)
+                }
+            }
+        }
+    }
+}
+
+/// A1.3 密码体检（纯本地计算）——已存口令的强度估值（bit）。
+/// 公式：长度 × log2(实测字符类并集)；类容量：小写 26 / 大写 26 / 数字 10 /
+/// ASCII 标点 32 / 其它（非 ASCII）64（估值，仅用于强度条分档）。
+pub fn estimate_strength_bits(secret: &str) -> f64 {
+    let mut classes = 0u32;
+    let mut has_lower = false;
+    let mut has_upper = false;
+    let mut has_digit = false;
+    let mut has_punct = false;
+    let mut has_other = false;
+    for ch in secret.chars() {
+        if ch.is_ascii_lowercase() {
+            has_lower = true;
+        } else if ch.is_ascii_uppercase() {
+            has_upper = true;
+        } else if ch.is_ascii_digit() {
+            has_digit = true;
+        } else if ch.is_ascii_graphic() {
+            has_punct = true;
+        } else {
+            has_other = true;
+        }
+    }
+    if has_lower {
+        classes += 26;
+    }
+    if has_upper {
+        classes += 26;
+    }
+    if has_digit {
+        classes += 10;
+    }
+    if has_punct {
+        classes += 32;
+    }
+    if has_other {
+        classes += 64;
+    }
+    if classes == 0 {
+        return 0.0;
+    }
+    secret.chars().count() as f64 * (classes as f64).log2()
+}
+
+/// A1.3 重复使用检测的分组结果（只含 uuid，零秘密外泄）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReuseGroup {
+    pub member_uuids: Vec<[u8; 16]>,
+}
+
+/// A1.3 重复使用检测：同一非空秘密出现在多条条目 → 每组返回其 uuid 列表。
+/// 纯本地计算；结果不含任何秘密内容。
+pub fn find_reused_secrets<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<ReuseGroup> {
+    let mut by_secret: Vec<(&str, Vec<[u8; 16]>)> = Vec::new();
+    for entry in entries {
+        let Some(secret) = entry.secret.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        match by_secret.iter_mut().find(|(s, _)| *s == secret) {
+            Some((_, uuids)) => uuids.push(entry.uuid),
+            None => by_secret.push((secret, vec![entry.uuid])),
+        }
+    }
+    by_secret
+        .into_iter()
+        .filter(|(_, uuids)| uuids.len() >= 2)
+        .map(|(_, member_uuids)| ReuseGroup { member_uuids })
+        .collect()
 }
 
 fn find_in<'a>(group: &'a Group, uuid: &[u8; 16]) -> Option<&'a Entry> {
@@ -193,6 +320,8 @@ impl Vault {
                 }],
             },
             recycle_bin: bin_uuid,
+            profiles: Vec::new(),
+            active_profile: None,
         })
     }
 
@@ -631,5 +760,89 @@ mod tests {
         let dbg = format!("{key:?}");
         assert!(dbg.contains(REDACTED));
         assert!(!dbg.contains(&key.display().replace(' ', "")));
+    }
+
+    #[test]
+    fn tags_and_favorite_roundtrip() {
+        let entropy = OsEntropy;
+        let mut session = VaultSession::create("v", b"pw", &FAST_KDF, &entropy).unwrap();
+        let mut entry = sample_entry(&entropy);
+        entry.tags = vec!["work".into(), "finance".into()];
+        entry.favorite = true;
+        let uuid = entry.uuid;
+        session.vault.add(entry.clone()).unwrap();
+
+        let mut store = MemoryStore(None);
+        session.save(&mut store, &entropy).unwrap();
+        let restored = VaultSession::unlock(&mut store, b"pw").unwrap();
+        assert_eq!(restored.vault.find(&uuid), Some(&entry));
+
+        // 空即省略：无标签、未收藏的条目不落 tags / favorite 字段。
+        let plain = sample_entry(&entropy);
+        let mut s2 = VaultSession::create("v2", b"pw", &FAST_KDF, &entropy).unwrap();
+        s2.vault.add(plain).unwrap();
+        let bytes = xml::write_document(&s2.vault, &mut xml::protected_stream(&[0u8; 64]).unwrap())
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("<Key>tags</Key>"));
+        assert!(!text.contains("<Key>favorite</Key>"));
+    }
+
+    #[test]
+    fn reused_secrets_detected_without_leaking() {
+        let entropy = OsEntropy;
+        let mut a = sample_entry(&entropy);
+        a.secret = Some("same-secret".into());
+        let mut b = sample_entry(&entropy);
+        b.secret = Some("same-secret".into());
+        let mut c = sample_entry(&entropy);
+        c.secret = Some("unique-secret".into());
+        let mut d = sample_entry(&entropy);
+        d.secret = None;
+
+        let groups = find_reused_secrets([&a, &b, &c, &d]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].member_uuids, vec![a.uuid, b.uuid]);
+        let dbg = format!("{groups:?}");
+        assert!(!dbg.contains("same-secret"), "结果不得携带秘密");
+    }
+
+    #[test]
+    fn strength_estimator_matches_formula() {
+        // 8 位纯小写 = 8 × log2(26)；4 位四类 = 4 × log2(94)。
+        assert!((estimate_strength_bits("aaaaaaaa") - 8.0 * 26f64.log2()).abs() < 1e-9);
+        assert!((estimate_strength_bits("aA0!") - 4.0 * 94f64.log2()).abs() < 1e-9);
+        assert_eq!(estimate_strength_bits(""), 0.0);
+    }
+
+    #[test]
+    fn identity_profiles_crud_and_roundtrip() {
+        let entropy = OsEntropy;
+        let mut session = VaultSession::create("v", b"pw", &FAST_KDF, &entropy).unwrap();
+        session.vault.set_profile(IdentityProfile {
+            name: "工作".into(),
+            account_refs: vec!["acc-work-1".into(), "acc-work-2".into()],
+        });
+        session.vault.set_profile(IdentityProfile {
+            name: "个人".into(),
+            account_refs: vec!["acc-home-1".into()],
+        });
+        session.vault.set_active_profile(Some("工作")).unwrap();
+        assert_eq!(
+            session.vault.set_active_profile(Some("不存在")).unwrap_err(),
+            VaultError::NotFound
+        );
+
+        let mut store = MemoryStore(None);
+        session.save(&mut store, &entropy).unwrap();
+        let restored = VaultSession::unlock(&mut store, b"pw").unwrap();
+        assert_eq!(restored.vault.profiles, session.vault.profiles);
+        assert_eq!(restored.vault.active_profile.as_deref(), Some("工作"));
+
+        // 删除生效档案同时清除生效标记。
+        let mut v = restored.vault;
+        assert!(v.remove_profile("工作"));
+        assert!(!v.remove_profile("工作"));
+        assert_eq!(v.active_profile, None);
     }
 }

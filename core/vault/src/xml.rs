@@ -11,7 +11,7 @@ use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 use quick_xml::XmlVersion;
 
-use crate::{Entry, Group, Vault, VaultError};
+use crate::{Entry, Group, IdentityProfile, Vault, VaultError};
 
 const K_TITLE: &str = "Title";
 const K_USERNAME: &str = "UserName";
@@ -21,6 +21,8 @@ const K_NOTES: &str = "Notes";
 const K_ACCOUNT_REF: &str = "account_ref";
 const K_KIND: &str = "kind";
 const K_TOTP: &str = "totp_seed";
+const K_TAGS: &str = "tags";
+const K_FAVORITE: &str = "favorite";
 
 fn wio<T>(r: std::io::Result<T>) -> Result<T, VaultError> {
     r.map_err(|_| VaultError::Malformed)
@@ -106,6 +108,14 @@ fn entry_elem(
         stream,
     )?;
     string_field(w, K_TOTP, entry.totp_seed.as_deref(), true, stream)?;
+    // A1.1 标签 / A1.2 收藏：空即省略（与 skip_serializing_if 口径一致）。
+    if !entry.tags.is_empty() {
+        let joined = entry.tags.join(";");
+        string_field(w, K_TAGS, Some(&joined), false, stream)?;
+    }
+    if entry.favorite {
+        string_field(w, K_FAVORITE, Some("true"), false, stream)?;
+    }
     wio(w.write_event(Event::End(BytesEnd::new("Entry"))))?;
     Ok(())
 }
@@ -141,6 +151,15 @@ pub fn write_document(vault: &Vault, stream: &mut ChaCha20Stream) -> Result<Vec<
     elem_text(&mut w, "DatabaseName", &vault.name)?;
     elem_text(&mut w, "RecycleBinEnabled", "True")?;
     elem_text(&mut w, "RecycleBinUUID", &BASE64.encode(vault.recycle_bin))?;
+    // A4.2 身份档案：Meta/CustomData（KeePass 标准位），值为 JSON。
+    if !vault.profiles.is_empty() || vault.active_profile.is_some() {
+        wio(w.write_event(Event::Start(BytesStart::new("CustomData"))))?;
+        custom_item(&mut w, "profiles", &profiles_json(&vault.profiles))?;
+        if let Some(active) = &vault.active_profile {
+            custom_item(&mut w, "active_profile", active)?;
+        }
+        wio(w.write_event(Event::End(BytesEnd::new("CustomData"))))?;
+    }
     wio(w.write_event(Event::End(BytesEnd::new("Meta"))))?;
     wio(w.write_event(Event::Start(BytesStart::new("Root"))))?;
     group_elem(&mut w, &vault.root, stream)?;
@@ -280,6 +299,8 @@ fn parse_entry(el: &Element, stream: &mut ChaCha20Stream) -> Result<Entry, Vault
         totp_seed: None,
         url: None,
         note: None,
+        tags: Vec::new(),
+        favorite: false,
     };
     for s in el.children.iter().filter(|c| c.name == "String") {
         let key = s.child("Key").map(|c| c.text.as_str()).unwrap_or_default();
@@ -305,6 +326,15 @@ fn parse_entry(el: &Element, stream: &mut ChaCha20Stream) -> Result<Entry, Vault
             K_ACCOUNT_REF => entry.account_ref = raw,
             K_KIND => entry.kind = kind_from(&raw),
             K_TOTP => entry.totp_seed = non_empty(raw),
+            K_TAGS => {
+                entry.tags = raw
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }
+            K_FAVORITE => entry.favorite = raw.eq_ignore_ascii_case("true"),
             _ => {}
         }
     }
@@ -352,9 +382,66 @@ pub fn parse_document(xml: &str, stream: &mut ChaCha20Stream) -> Result<Vault, V
         .iter()
         .find(|c| c.name == "Group")
         .ok_or(VaultError::Malformed)?;
+    // A4.2 身份档案（Meta/CustomData；缺省即空）。
+    let mut profiles = Vec::new();
+    let mut active_profile = None;
+    if let Some(custom) = meta.child("CustomData") {
+        for item in custom.children.iter().filter(|c| c.name == "Item") {
+            let key = item.child("Key").map(|c| c.text.as_str()).unwrap_or_default();
+            let value = item.child("Value").map(|c| c.text.clone()).unwrap_or_default();
+            match key {
+                "profiles" => profiles = profiles_from_json(&value)?,
+                "active_profile" => active_profile = Some(value).filter(|s| !s.is_empty()),
+                _ => {}
+            }
+        }
+    }
     Ok(Vault {
         name,
         root: parse_group(group, stream)?,
         recycle_bin,
+        profiles,
+        active_profile,
     })
+}
+
+fn custom_item(w: &mut Writer<Vec<u8>>, key: &str, value: &str) -> Result<(), VaultError> {
+    wio(w.write_event(Event::Start(BytesStart::new("Item"))))?;
+    elem_text(w, "Key", key)?;
+    elem_text(w, "Value", value)?;
+    wio(w.write_event(Event::End(BytesEnd::new("Item"))))?;
+    Ok(())
+}
+
+fn profiles_json(profiles: &[IdentityProfile]) -> String {
+    let items: Vec<serde_json::Value> = profiles
+        .iter()
+        .map(|p| serde_json::json!({ "name": p.name, "account_refs": p.account_refs }))
+        .collect();
+    serde_json::Value::Array(items).to_string()
+}
+
+fn profiles_from_json(text: &str) -> Result<Vec<IdentityProfile>, VaultError> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| VaultError::Malformed)?;
+    let items = value.as_array().ok_or(VaultError::Malformed)?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or(VaultError::Malformed)?;
+        let refs = item
+            .get("account_refs")
+            .and_then(|v| v.as_array())
+            .ok_or(VaultError::Malformed)?;
+        let mut account_refs = Vec::with_capacity(refs.len());
+        for r in refs {
+            account_refs.push(r.as_str().ok_or(VaultError::Malformed)?.to_string());
+        }
+        out.push(IdentityProfile {
+            name: name.to_string(),
+            account_refs,
+        });
+    }
+    Ok(out)
 }

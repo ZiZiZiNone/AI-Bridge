@@ -10,3 +10,4 @@ ab-crypto = { path = "../crypto" }
 base64 = "0.23"
 flate2 = "1.1"
 quick-xml = "0.42"
+serde_json = "1"
