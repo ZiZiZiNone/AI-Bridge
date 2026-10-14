@@ -14,8 +14,8 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# 未验证：本机未安装 cargo / rustc，未执行 cargo check / cargo build，
-# Tauri 2 依赖版本线与 API 形态均未经编译验证（按 2.x 稳定线写）。
+# 2026-10-12 起已编译验证：tauri 2.12.3（经 tools/fetch-vendor.py vendored 依赖离线解析），
+# cargo test 22/22 通过。运行时行为（真实 WebView / IPC / 托盘）仍未验证，见 desktop/README.md。
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -42,7 +42,7 @@ desktop/
 │     ├─ panels/              W3–W10 弹出面板
 │     └─ wizard/              W11–W14 一次性向导
 ├─ src-tauri/
-│  ├─ Cargo.toml              包 ab-desktop（独立 workspace；tauri 2.x 稳定线，未验证）
+│  ├─ Cargo.toml              包 ab-desktop（独立 workspace；tauri 2.12.3，已编译验证）
 │  ├─ build.rs                tauri-build（标准形态）
 │  ├─ tauri.conf.json         productName / devUrl 1420 / frontendDist ../dist / CSP
 │  ├─ capabilities/default.json  最小能力集（仅窗口显示类权限）
@@ -123,7 +123,7 @@ cargo tauri build                # 打包 NSIS / MSI
 | `npm run typecheck` | `vue-tsc --noEmit`：全部 `.vue` / `.ts` 严格类型检查 | **通过**（exit 0，无输出） |
 | `npm run check:structure` | 8 项结构硬规则（见下） | **8/8 通过** |
 | `npm run check:render` | 15 个界面真渲染（`@vue/compiler-sfc` + SSR，Node 内） | **15/15 通过** |
-| `cargo test` | Rust 单测（窗口清单 / 菜单 / 协议解析 / 帧编解码） | **未执行**（无 cargo） |
+| `cargo test` | Rust 单测（窗口清单 / 菜单 / 协议解析 / 帧编解码） | **通过 22/22**（2026-10-12 实跑；tauri 2.12.3 经 `tools/fetch-vendor.py` vendored 依赖离线解析编译） |
 | `npm run build` / `cargo tauri dev` | 完整构建与联调 | **未执行**（见未验证声明） |
 
 `check:structure` 的 8 项：① Rust 模块结构与 `docs/目录结构.md` 一致；② W1–W15 各一个视图且分组数量
@@ -138,24 +138,26 @@ Node 动态 `import` → `@vue/server-renderer` 渲染）真正执行模板、`d
 
 ## 6. 未验证声明
 
-本目录为**骨架**，以下各项**未执行 / 未验证**（本机无 Rust 工具链，且沙盒限制见上）：
+以下各项**未执行 / 未验证**（`vite build` 的 esbuild 派生进程与真实 WebView 均不可得；Rust 侧已于
+2026-10-12 实跑 `cargo test` 22/22 通过，此前的「无工具链」限制经 vendored 依赖解除）：
 
-1. `cargo check` / `cargo build` / `cargo test` / `cargo clippy` 均未运行；`Cargo.toml` 的
-   Tauri 2.x 版本线、`tauri-build`、依赖解析**未经验证**。
-2. Tauri 2 API 形态未编译验证：`WebviewWindowBuilder` 链式调用、`AppHandle::get_webview_window`、
-   `WebviewWindow::is_visible/show/hide/destroy/set_focus`、`tauri::generate_handler!`、
-   `tauri::generate_context!`、`.setup()` 的错误类型转换。
+1. ~~cargo 未运行~~ **已解除**：`cargo test` 通过（22/22）；`Cargo.toml` 的 Tauri 2.x 版本线
+   解析为 tauri 2.12.3 并编译通过。`cargo clippy` 未运行（25 条 warning 多为骨架未用代码）。
+2. Tauri 2 API 形态**已编译验证**（`WebviewWindowBuilder` 链式调用、`AppHandle::get_webview_window`、
+   `tauri::generate_handler!` / `generate_context!` 等均通过编译）；**运行时行为**（窗口生命周期、
+   置顶、IPC 往返）仍未经真实 WebView 验证。
 3. `tauri.conf.json`（`app.windows`、`security.csp`、`bundle.*`、`frontendDist`）与
-   `capabilities/default.json` 的权限标识符**未经验证**（`core:default` 与窗口类权限按 Tauri 2 文档写）。
+   `capabilities/default.json` 的权限标识符**运行时未验证**（`core:default` 与窗口类权限按 Tauri 2 文档写）。
 4. 托盘实现为骨架：`ui::tray::install` / `set_state` 是 `todo!()`，托盘图标三态资源
    （`tray-locked/ready/alert.png`）**未生成**（只有 bundle 用 `icons/*`）；托盘菜单因此暂无运行时效果。
 5. `native/` 全部方法为 `todo!()` 骨架：DPAPI（`CryptProtectData` 等）、Windows Hello（WinRT
    `UserConsentVerifier`）、剪贴板 API、UIA / `SendInput`、注册表协议注册，**均未实现、未验证**。
-   另：core trait 未落地，故骨架**不含** `impl <core trait> for <类型>`，只有与 trait 方法对应的
-   同签名方法与接口注释（core 落地后补 impl 头）。
-6. `bridge/ext_protocol.rs` / `messaging_host.rs` 的单测**已写但未运行**；native messaging 的
-   真实 stdio 往返与浏览器侧握手未验证；`--native-messaging-host` 分流未经进程级验证
-   （Chromium 清单不支持带参数的 path，实现期需独立可执行文件）。
+   另：core 已落地（`core/` 各 ab-* crate），但桌面侧**尚未接线**（无 `impl <core trait> for <类型>`、
+   无 ab-* 依赖），骨架只有与 trait 方法对应的同签名方法与接口注释，接线属后续任务。
+6. `bridge/ext_protocol.rs` / `messaging_host.rs` 的单测**已运行，22/22 通过**（帧编解码、
+   边界帧、协议错误路径）；native messaging 的真实 stdio 往返与浏览器侧握手未验证；
+   `--native-messaging-host` 分流未经进程级验证（Chromium 清单不支持带参数的 path，
+   实现期需独立可执行文件）。
 7. 前端：`vite build`（Rollup 打包）与 `cargo tauri dev` 联调**未执行**；`@tauri-apps/api`
    在真实 WebView 中的行为（窗口关闭/销毁/置顶、CSP 与 IPC 连通）**未验证**；
    界面数据接入（core 命令）尚未接线，面板显示空态。
