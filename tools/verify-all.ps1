@@ -36,6 +36,7 @@ function Invoke-Check([string]$name, [string[]]$cmd) {
 Invoke-Check "contracts"    @("python", "tools/check-contracts.py")
 Invoke-Check "tools-selftest" @("python", "tools/check-contracts.py", "--self-test")
 Invoke-Check "vendor-selftest" @("python", "tools/fetch-vendor.py", "--selftest")
+Invoke-Check "compat-lock"  @("node", "tests/contract-compat/check-compat.mjs", "--selftest")
 
 # 2. 核心层 + 契约兼容
 Invoke-Check "workspace"    @("cargo", "test", "--workspace", "--quiet")
@@ -51,8 +52,7 @@ Invoke-Check "converter-fixtures" @("node", "tests/converter-fixtures/run.mjs")
 # 4. 扩展层
 Invoke-Check "extensions-tsc" @("npx", "tsc", "--noEmit", "-p", "extensions/tsconfig.json")
 Invoke-Check "extensions-test" @("node", "--test", "--experimental-test-isolation=none",
-    "extensions/shared/test/bridge.test.ts", "extensions/shared/test/cookie.test.ts",
-    "extensions/shared/test/envelope.test.ts", "extensions/shared/test/types.test.ts")
+    "extensions/shared/test/*.test.ts")
 
 # 5. 桌面端
 Invoke-Check "desktop"       @("cargo", "test", "--manifest-path", "desktop/src-tauri/Cargo.toml", "--quiet")
