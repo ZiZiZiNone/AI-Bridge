@@ -1,0 +1,7 @@
+{
+  "name": "@aibridge/extensions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI-Bridge 浏览器扩展层源码（TypeScript / MV3）。无运行时依赖；本文件只声明 ESM 模块形态供 tsc 与运行时识别。"
+}

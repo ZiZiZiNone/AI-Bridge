@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>AI-Bridge · 安装引导</title>
+    <style>
+      body {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 32px 24px;
+        font-family: system-ui, "Segoe UI", sans-serif;
+        color: #0f172a;
+        line-height: 1.7;
+      }
+      h1 {
+        font-size: 22px;
+      }
+      h2 {
+        font-size: 16px;
+        margin-top: 28px;
+      }
+      ol,
+      table {
+        margin: 8px 0;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+      th,
+      td {
+        border: 1px solid #e2e8f0;
+        padding: 8px 10px;
+        text-align: left;
+        font-size: 14px;
+      }
+      th {
+        background: #f1f5f9;
+      }
+      button {
+        font-size: 14px;
+        padding: 8px 16px;
+        cursor: pointer;
+      }
+      #handshake-result {
+        margin-left: 12px;
+        font-size: 14px;
+      }
+      #handshake-result[data-state="ok"] {
+        color: #15803d;
+      }
+      #handshake-result[data-state="fail"] {
+        color: #b91c1c;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>欢迎使用 AI-Bridge</h1>
+    <p>
+      AI-Bridge 是纯本地的登录态管理器：你的登录态保存在本机，跨设备时只经
+      <strong>设备同步（局域网）</strong> 直传或面对面二维码配对，不出网、不经过任何服务器。
+    </p>
+
+    <h2>一、连接本机主程序（native messaging 握手）</h2>
+    <ol>
+      <li>请先安装并启动 AI-Bridge 主程序（Windows 桌面版）。</li>
+      <li>主程序会注册浏览器 native messaging 宿主；扩展通过它读取与注入登录态。</li>
+      <li>点击下方按钮测试连接，确认扩展与主程序已握手。</li>
+    </ol>
+    <p>
+      <button id="handshake-button" type="button">测试连接</button>
+      <span id="handshake-result" data-state="unknown"></span>
+    </p>
+
+    <h2>二、权限说明</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>权限</th>
+          <th>用途</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>读取与修改 Cookie</td>
+          <td>读取当前站点登录态（含 HttpOnly）、按你的操作注入或清除登录态；这是登录态管理的功能本体。</td>
+        </tr>
+        <tr>
+          <td>与本机程序通信（native messaging）</td>
+          <td>与本机 AI-Bridge 主程序通信：查询账号、取用会话与凭据、跨浏览器会话桥、设备同步（局域网）。</td>
+        </tr>
+        <tr>
+          <td>所有网站（&lt;all_urls&gt;）</td>
+          <td>在任意站点读写该站点登录态，并在登录页提供表单填充（b 级退路）。</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      扩展不保存你的主口令，也不保存任何密钥；登录态只在本机扩展与主程序之间流转，
+      动作记录写入主程序的本地审计。
+    </p>
+
+    <script type="module" src="onboarding.js"></script>
+  </body>
+</html>

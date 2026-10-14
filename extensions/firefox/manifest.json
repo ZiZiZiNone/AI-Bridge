@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "AI-Bridge",
+  "version": "0.1.0",
+  "description": "AI-Bridge 浏览器扩展：本机登录态读取/注入、表单填充与设备同步（局域网）桥接。",
+  "permissions": ["cookies", "nativeMessaging"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "AI-Bridge"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ai-bridge@aibridge.local"
+    }
+  }
+}

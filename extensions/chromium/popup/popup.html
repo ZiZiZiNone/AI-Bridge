@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>AI-Bridge</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>AI-Bridge</h1>
+      <p id="bridge-status" data-state="unknown">检测中…</p>
+    </header>
+
+    <main>
+      <section id="accounts-section">
+        <h2>当前站点账号 <span id="domain-label"></span></h2>
+        <ul id="account-list"></ul>
+        <p id="accounts-empty" hidden>当前站点暂无可用账号</p>
+        <p id="message-box" hidden></p>
+      </section>
+
+      <section id="push-section">
+        <h2>推送到设备</h2>
+        <label>
+          目标设备
+          <select id="push-targets"><option value="">（请选择）</option></select>
+        </label>
+        <label>
+          账号
+          <select id="push-account"><option value="">（请选择）</option></select>
+        </label>
+        <button id="push-button" type="button">推送</button>
+      </section>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -83,7 +83,7 @@ function decodeRaw(value: unknown): BridgeMessage {
 test("v1 词表固定：版本 / 消息类别 / 方法 / 事件 / 错误码 / 方言", () => {
   assert.equal(BRIDGE_PROTOCOL_VERSION, 1);
   assert.deepEqual(BRIDGE_MESSAGE_TYPES, ["request", "response", "event"]);
-  assert.deepEqual(BRIDGE_METHODS, ["handshake", "session.capture", "session.inject", "credential.fill", "ping"]);
+  assert.deepEqual(BRIDGE_METHODS, ["handshake", "session.query", "session.fetch", "session.capture", "session.inject", "push.targets", "credential.fill", "ping"]);
   assert.deepEqual(BRIDGE_EVENTS, ["state.changed", "broker.revoked", "host.disconnected"]);
   assert.deepEqual(BRIDGE_ERROR_CODES, ["unknown_method", "unsupported_version", "invalid_params", "denied", "internal"]);
   assert.deepEqual(BRIDGE_DIALECTS, ["chromium", "firefox"]);

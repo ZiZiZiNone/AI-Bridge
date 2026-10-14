@@ -5,15 +5,19 @@
  * 之间只走这一份消息定义，双方不引对方代码（契约层 ← 核心层 ← 宿主层的单向依赖）。
  *
  * 三条纪律：
- * 1. 三类消息：request（扩展→宿主）/ response（宿主→扩展，与 request.id 配对）/ event（宿主→扩展，无配对）。
- * 2. 消息体只承载契约类型（SessionEnvelope / Cookie / Target / CredentialRecord），不发明业务字段。
+ * 1. 三类消息：request（任一侧发起，另一侧回 response 与 request.id 配对）/ response / event。
+ * 2. 消息体只承载契约类型（SessionEnvelope / StandardAccess / Cookie / Target / CredentialRecord）
+ *    与少量控制字段（id、method、destination 等），不发明业务字段。
  * 3. 本层只做协议编解码与形状校验：参数与结果里的**业务**合法性（信封能否解码、目标是否获授权）
  *    由方法处理器用 envelope.ts / core 规则校验。
+ *
+ * **协议状态：v1 为最小设计，待与 desktop/bridge 联调时定稿**
+ * （方法面 / 结果形状 / request 方向约定均可能调整，见 extensions/shared/README.md）。
  *
  * 传输层边界：native messaging 的 4 字节小端长度前缀由宿主侧 `desktop/bridge/messaging_host`
  * 负责，扩展侧由浏览器 `runtime.connectNative` 端口负责，本文件不实现分帧。
  */
-import type { CredentialRecord, SessionEnvelope, Target } from "./types.ts";
+import type { CredentialRecord, SessionEnvelope, StandardAccess, Target } from "./types.ts";
 import type { ShapeErrorCode } from "./envelope.ts";
 import { checkShape, isPlainObject } from "./envelope.ts";
 
@@ -29,17 +33,29 @@ export type BridgeDialect = (typeof BRIDGE_DIALECTS)[number];
 
 /**
  * v1 方法面（覆盖四条数据流里扩展参与的部分）：
- * handshake=版本/方言协商；session.capture=扩展读 cookie → 归一化上报；
- * session.inject=宿主下发信封 → 扩展注入；credential.fill=取候选填表；ping=存活探测。
+ * handshake=版本/方言协商；session.query=按目标查候选（X1 账号列表）；
+ * session.fetch=按账号取会话信封（B1 注入，动作瞬间传递、用完即弃）；
+ * session.capture=读 cookie 上报（含 destination 控制字段时即 B2 推送）；
+ * session.inject=宿主下发信封 → 扩展注入（B2 目标侧 / E1）；push.targets=推送目标清单（X1 设备选择）；
+ * credential.fill=取候选凭据（B1 复制 / B3.1 填表）；ping=存活探测（X1 桥状态）。
  */
 export const BRIDGE_METHODS = [
   "handshake",
+  "session.query",
+  "session.fetch",
   "session.capture",
   "session.inject",
+  "push.targets",
   "credential.fill",
   "ping",
 ] as const;
 export type BridgeMethod = (typeof BRIDGE_METHODS)[number];
+
+/** 推送目标（控制字段：目标标识 + 展示名，不含业务语义；清单由宿主给出）。 */
+export interface PushTarget {
+  id: string;
+  label: string;
+}
 
 /** v1 事件面：状态变化 / 临时会话撤销 / 宿主断开。 */
 export const BRIDGE_EVENTS = ["state.changed", "broker.revoked", "host.disconnected"] as const;
@@ -66,16 +82,31 @@ export interface BridgeMethodMap {
     params: { protocol_version: number; dialect: BridgeDialect; extension_id: string };
     result: { protocol_version: number; host_version: string };
   };
+  "session.query": {
+    params: { target: Target };
+    /** 候选以 StandardAccess 承载（结构化候选的 docs 未定义，暂用契约类型——待确认）。 */
+    result: { access: StandardAccess };
+  };
+  "session.fetch": {
+    params: { account_ref: string; target: Target };
+    result: { envelope: SessionEnvelope };
+  };
   "session.capture": {
-    params: { envelope: SessionEnvelope };
-    result: { stored: boolean };
+    /** destination 为控制字段（目标扩展/设备标识）：有值即 B2 推送，无值即仅上报。 */
+    params: { envelope: SessionEnvelope; destination?: string };
+    result: { stored: boolean; delivered?: boolean };
   };
   "session.inject": {
     params: { envelope: SessionEnvelope };
     result: { injected: number; skipped: number };
   };
+  "push.targets": {
+    params: Record<string, never>;
+    result: { targets: PushTarget[] };
+  };
   "credential.fill": {
-    params: { target: Target };
+    /** account_ref 可选：多账号时指定取哪个账号（来自 core 的账号引用）。 */
+    params: { target: Target; account_ref?: string };
     result: { credentials: CredentialRecord[] };
   };
   ping: {
