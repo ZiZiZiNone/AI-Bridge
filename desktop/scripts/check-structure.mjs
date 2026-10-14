@@ -10,7 +10,8 @@
  *   4. 窗口标签表：src-tauri WINDOW_SPECS ↔ src/ui/window-registry.ts WINDOW_VIEWS（13 个，双向相等）
  *   5. 托盘菜单：src-tauri MENU_ITEMS ↔ src/ui/tray/TrayMenu.vue（id + label 全等）
  *   6. 契约字段：contracts/*.schema.json ↔ src/types/contract.ts 逐字段一致（含必填性）
- *   7. 依赖方向：native/ 与 bridge/ 不依赖 tauri、不依赖 ui；desktop 不引用 core crate
+ *   7. 依赖方向：native/ 与 bridge/ 不依赖 tauri、不依赖 ui；core 不得反向依赖 desktop
+ *      （desktop → core → contracts 是合法方向，宿主允许 use ab_*）
  *   8. SFC 块顺序 template → script → style，且 script 为 lang="ts"
  *
  * 用法：npm run check:structure（失败以非零码退出并逐条列出原因）
@@ -274,7 +275,7 @@ check('6. 契约字段逐字段一致（contracts/*.schema.json ↔ src/types/co
 
 /* ---------------- 7. 依赖方向 ---------------- */
 
-check('7. 依赖方向：native/ 与 bridge/ 不碰 tauri 与 ui；desktop 不引用 core crate', () => {
+check('7. 依赖方向：native/ 与 bridge/ 不碰 tauri 与 ui；core 不得反向依赖 desktop', () => {
   const nativeAndBridge = walk(RUST_SRC).filter(
     (path) => /(native|bridge)[\\/]/.test(path) && path.endsWith('.rs'),
   );
@@ -285,14 +286,20 @@ check('7. 依赖方向：native/ 与 bridge/ 不碰 tauri 与 ui；desktop 不�
     assert(!/^\s*use\s+crate::ui/m.test(source), `${rel(path)} 反向依赖了 crate::ui`);
   }
 
-  const rustFiles = walk(RUST_SRC).filter((path) => path.endsWith('.rs'));
-  for (const path of rustFiles) {
-    assert(!/^\s*use\s+ab_/m.test(read(path)), `${rel(path)} 直接引用 core crate（core 尚未落地）`);
+  // 架构方向（P1-13 修正）：desktop → core → contracts 是**正确**依赖方向，
+  // 宿主允许 use ab_*；反向（core 引用 desktop）才是违反分层。
+  // core/**/Cargo.toml 不得出现指向 desktop 的路径依赖。
+  const coreManifests = walk(join(REPO, 'core')).filter((path) => path.endsWith('Cargo.toml'));
+  let coreCrateCount = 0;
+  for (const path of coreManifests) {
+    coreCrateCount += 1;
+    const source = read(path);
+    assert(
+      !/desktop/.test(source),
+      `${rel(path)} 反向依赖了 desktop（core → desktop 违反分层：宿主→core→契约）`,
+    );
   }
-
-  const manifest = read(join(DESKTOP, 'src-tauri', 'Cargo.toml'));
-  assert(!/path\s*=\s*"\.\.\/\.\.\/core/.test(manifest), 'Cargo.toml 不应指向 core/ 的路径依赖');
-  return `${nativeAndBridge.length} 个 native/bridge 文件 + ${rustFiles.length} 个 Rust 文件方向正确`;
+  return `${nativeAndBridge.length} 个 native/bridge 文件 + ${coreCrateCount} 个 core Cargo.toml 方向正确`;
 });
 
 /* ---------------- 8. SFC 块顺序 ---------------- */

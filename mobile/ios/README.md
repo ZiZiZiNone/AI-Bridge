@@ -58,7 +58,7 @@ mobile/ios/
 | M1 | 锁屏 / 解锁 | `app/Pages/UnlockView.swift`（门：`app/AIBridgeApp.swift` RootFlowView） | S1 |
 | M2 | 库列表 + 搜索 | `app/Pages/VaultListView.swift` + `app/RootView.swift` | A1.2 |
 | M3 | 条目详情 + 编辑表单 | `app/Pages/EntryDetailView.swift` | A1.1、B5.1、E5 |
-| M4 | 生成器 | `app/Pages/GeneratorView.swift` | A5（默认 20 位、不存历史） |
+| M4 | 生成器 | `app/Pages/GeneratorView.swift` | A5（默认 20 位、不存历史、实时强度条、口令词模式） |
 | M5 | 容器浏览器 | `app/Pages/ContainerBrowserView.swift` + `app/WebView/` | 登录、会话捕获、E1/E2 |
 | M6 | 状态 / 临时会话 | `app/Pages/SessionStatusView.swift` | A2、C 视图 |
 | M7 | 配对与设备 | `app/Pages/PairingView.swift` + `FingerprintConfirmView.swift` + `QRScanView.swift` | E3、A8 |
@@ -100,6 +100,10 @@ mobile/ios/
   secure/http_only/same_site/expires_at）在容器桥、Safari 桥、JS 三处映射均全量携带（A2 零丢弃）。
 - **命名假设（未验证）**：UDL 的 trait / dictionary / 方法名按 UniFFI 惯例转为 Swift 协议与 camelCase
   （如 `listEntries(query:)`、`ScopeSpec(domainAllowlist:readOnly:singleUse:)`）；生成后需校准。
+  A5 面的 Swift 侧符号同样待核对：`PassphraseSpec(words:wordCount:separator:)`、
+  `Vault.generatePassphrase(spec:)`、自由函数 `generatorEntropyBits(spec:)` / `passphraseEntropyBits(spec:)`
+  （UDL 对应 `Vault.generate_passphrase` 与 namespace 级 `generator_entropy_bits` / `passphrase_entropy_bits`；
+  dictionary 不能挂方法，故熵函数镜像为自由函数——见 aibridge.udl 该处注释）。
 
 ## 4. 未验证声明（本机 Windows，无 Xcode / 无 Apple 工具链）
 
@@ -149,8 +153,11 @@ mobile/ios/
 3. **接收侧注入入口**：UDL 公开面上没有「envelopes → 容器注入」的显式入口（M-F2 反向：PC 扩散来会话 →
    注入容器）；现按设计为 core 经 `SessionSource.inject` 回写，具体触发 API 待 core 侧确认。
 4. **新建条目 account_ref 分配语义**：UDL 无 allocate API，现由宿主生成 UUID 暂代。
-5. **A5.2 口令词模式**：`GeneratorSpec` 无词表字段，UI 未提供口令词模式（契约缺口）。
-6. **A6 备份接口**：备份 / 最后验证时间 / 恢复演练 / 恢复导入不在 UDL 公开面，M8 相应行显示「待接入」。
+5. ~~A5.2 口令词模式~~ **已实现**（UDL 已镜像 `PassphraseSpec` / `generate_passphrase` / `*_entropy_bits`）：
+   词表 / 词数 / 分隔符由 UI 配置（core 无默认、无内置词表）；词表为会话内配置、未持久化
+   （core 无词表存储面，如需跨会话保存待定）。
+6. **A6 备份接线**：UDL 已补 A6 面（`Vault.save/recovery_copy/from_backup/open_copy` + `RecoveryKey`），
+   但 M8 尚未接线；M8 行仍显示「待接入」，且该页「A6 接口不在 FFI 公开面」文案已过时，需随接线任务一并更新。
 7. **设备命名 / 解绑（E3）**：UDL 无设备管理 API，M7 设备列表仅展示 `Transport.peers()`。
 8. **passkey / TOTP 的系统填充形态**（M9）：UDL 无填充形状定义，现仅填充 username/secret。
 9. **快速解锁密钥包装形态**：现为 Keychain 生物门控直接保存主口令（仅解锁因子），需与 core 密钥层次对齐。

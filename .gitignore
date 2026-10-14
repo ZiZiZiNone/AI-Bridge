@@ -9,6 +9,16 @@ node_modules/
 
 # === 构建期缓存（集中放置，项目收尾统一清理）===
 .cargo-home/
+tools/.self-test-tmp/
+.dsh-inspect/
+
+# === Tauri 生成物 ===
+# gen/schemas 的 4 个 json 已入库（Tauri 生成的 schema 快照，commit 9a1b095 有意收录），
+# 只忽略 schemas 之外的后续生成物
+desktop/src-tauri/gen/*
+!desktop/src-tauri/gen/schemas/
+desktop/src-tauri/gen/schemas/*
+!desktop/src-tauri/gen/schemas/*.json
 
 # === 开发过程文档（设计稿，非最终产物，不入库）===
 docs/

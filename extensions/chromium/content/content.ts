@@ -91,7 +91,10 @@ function renderWidget(): void {
   widget.textContent = "AI-Bridge 填充";
   widget.style.cssText =
     "position:fixed;z-index:2147483647;right:16px;bottom:16px;padding:6px 10px;font-size:12px;";
-  widget.addEventListener("click", () => {
+  widget.addEventListener("click", (event) => {
+    // 合成 click（element.click()，isTrusted=false）不触发凭据填充（P1-8）：
+    // 真实用户点击才允许；凭据数据仍一律经 background（runtime.sendMessage）取回。
+    if (!event.isTrusted) return;
     void fillForm(undefined);
   });
   document.body.append(widget);
@@ -113,8 +116,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-/** 快捷键（B-F3）：Ctrl+1 填用户名、Ctrl+2 填密码（键位分配待确认）。 */
+/** 快捷键（B-F3）：Ctrl+1 填用户名、Ctrl+2 填密码（键位分配待确认）。
+ *  合成键盘事件（isTrusted=false，页面脚本可 dispatch）一律忽略（P1-8）：
+ *  只有真实用户按键才允许触发凭据填充。 */
 document.addEventListener("keydown", (event) => {
+  if (!event.isTrusted) return;
   if (!event.ctrlKey || event.altKey || event.metaKey) return;
   const form = findLoginForm();
   if (form === undefined) return;

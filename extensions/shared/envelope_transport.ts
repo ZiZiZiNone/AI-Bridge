@@ -369,6 +369,8 @@ export function startBridgeHost(deps: BridgeHostDeps): void {
         return { ok: true, result };
       }
       case "bridge.handshake": {
+        // P1-9 注：extension_id 为自报值（运行时环境 ID，非密码学身份），安全语义
+        // 待与 desktop/bridge 的 allowed_origins/allowed_extensions 联调定稿。
         const result = await callHost("handshake", {
           protocol_version: BRIDGE_PROTOCOL_VERSION,
           dialect: deps.dialect,
