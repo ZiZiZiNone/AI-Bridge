@@ -167,6 +167,10 @@ pub struct OfflinePack {
     pub format: String,
     /// 一次性 X25519 公钥，收件方与自己的私钥做 DH。
     pub ephemeral_public: [u8; 32],
+    /// 发送方设备 id（审查报告 P1-5）：收件方强制比对已配对设备表，
+    /// 未配对设备名义的包拒解——QR offer 是公开值，仅凭「知道收件人公钥」
+    /// 不足以构成投递资格。
+    pub from_device_id: String,
     pub issued_at_secs: i64,
     pub expires_at_secs: i64,
     pub sealed: Sealed,
@@ -300,10 +304,18 @@ impl SyncService {
         let expires_at_secs = now_unix_secs
             .checked_add(validity_secs as i64)
             .ok_or(SyncError::InvalidValidity)?;
-        self.pack_with_public(&peer.public_key, envelope, now_unix_secs, expires_at_secs, entropy)
+        self.pack_with_public(
+            &self.identity.device_id,
+            &peer.public_key,
+            envelope,
+            now_unix_secs,
+            expires_at_secs,
+            entropy,
+        )
     }
 
     /// A8 导入（A8.3）：先校验时间戳，过期拒解；解密后再校验信封。
+    /// 发送方强制属已配对设备表（审查报告 P1-5：QR offer 公开，防任意注入）。
     pub fn unpack(
         &self,
         pack: &OfflinePack,
@@ -315,8 +327,12 @@ impl SyncService {
         if now_unix_secs >= pack.expires_at_secs {
             return Err(SyncError::Expired);
         }
+        // 发送方资格：必须在已配对设备表内（fail-closed：旧格式无该字段即空串，拒）。
+        if self.confirmed_device(&pack.from_device_id).is_err() {
+            return Err(SyncError::UnknownDevice);
+        }
         let key = ephemeral_key(&self.identity.secret, &pack.ephemeral_public)?;
-        let aad = offline_aad(pack.issued_at_secs, pack.expires_at_secs);
+        let aad = offline_aad(&pack.from_device_id, pack.issued_at_secs, pack.expires_at_secs);
         let plain = open_with(&key, aad.as_bytes(), &pack.sealed)?;
         let envelope: SessionEnvelope =
             serde_json::from_slice(&plain).map_err(|_| SyncError::Malformed)?;
@@ -326,6 +342,7 @@ impl SyncService {
 
     fn pack_with_public(
         &self,
+        from_device_id: &str,
         recipient_public: &[u8; 32],
         envelope: &SessionEnvelope,
         issued_at_secs: i64,
@@ -338,12 +355,13 @@ impl SyncService {
             .map_err(|_| SyncError::EntropyFailed)?;
         let ephemeral_public = x25519_public(&*ephemeral_secret);
         let key = ephemeral_key(&ephemeral_secret, recipient_public)?;
-        let aad = offline_aad(issued_at_secs, expires_at_secs);
+        let aad = offline_aad(from_device_id, issued_at_secs, expires_at_secs);
         let bytes = serde_json::to_vec(envelope).map_err(|_| SyncError::Malformed)?;
         let sealed = seal_with(entropy, &key, aad.as_bytes(), &bytes)?;
         Ok(OfflinePack {
             format: OFFLINE_FORMAT.to_string(),
             ephemeral_public,
+            from_device_id: from_device_id.to_string(),
             issued_at_secs,
             expires_at_secs,
             sealed,
@@ -401,8 +419,10 @@ fn transfer_aad(from_device_id: &str, to_device_id: &str) -> String {
     format!("{TRANSFER_AAD}|{from_device_id}|{to_device_id}")
 }
 
-fn offline_aad(issued_at_secs: i64, expires_at_secs: i64) -> String {
-    format!("{OFFLINE_AAD}|{issued_at_secs}|{expires_at_secs}")
+/// A8 离线包 AAD：发送方设备 id 绑进 AEAD——篡改 from_device_id 即解密失败
+///（审查报告 P1-5：时间戳之外再无任何可换字段）。
+fn offline_aad(from_device_id: &str, issued_at_secs: i64, expires_at_secs: i64) -> String {
+    format!("{OFFLINE_AAD}|{from_device_id}|{issued_at_secs}|{expires_at_secs}")
 }
 
 fn seal_with(
@@ -627,10 +647,57 @@ mod tests {
         let pack = a
             .pack("phone-1", &envelope(), 3600, 1_000, &FixedEntropy(9))
             .unwrap();
+        // P1-5 后先撞发送方资格门（from=pc-1 不在 c 的已配对表），
+        // 非收件设备的私钥错误反而不必走到 AEAD。
         assert!(
-            matches!(c.unpack(&pack, 1_500), Err(SyncError::Crypto(_))),
-            "非收件设备私钥必须解不开"
+            matches!(c.unpack(&pack, 1_500), Err(SyncError::UnknownDevice)),
+            "未配对设备名义的包必须在解密前被拒"
         );
+    }
+
+    #[test]
+    fn offline_pack_rejects_unpaired_sender_and_aad_bound_sender() {
+        // 审查报告 P1-5：任何知道收件人公钥者（QR offer 是公开值）不得能注入。
+        let (a, b) = paired();
+        let pack = a
+            .pack("phone-1", &envelope(), 3600, 1_000, &FixedEntropy(9))
+            .unwrap();
+
+        // b 的已配对表 = {pc-1}。给 b 再配一个设备，制造「已配对但 from 被篡改」场景。
+        let third = service("tablet-1", 7);
+        let b_side = b.pair(
+            &PairingOffer {
+                device_id: "tablet-1".into(),
+                device_name: "平板".into(),
+                platform: DevicePlatform::Android,
+                public_key: third.identity().public_key,
+            },
+            1_000,
+        )
+        .unwrap();
+        b.confirm_pairing(&b_side).unwrap();
+
+        // 1) 篡改发送方 id 到 b 表中的另一台已配对设备：资格门过，AAD 失配拦（Crypto）。
+        let mut forged = pack.clone();
+        forged.from_device_id = "tablet-1".to_string();
+        let err = b.unpack(&forged, 1_500).unwrap_err();
+        assert!(
+            matches!(err, SyncError::Crypto(_)),
+            "from_device_id 必须被 AEAD-AAD 绑定，实得 {err:?}"
+        );
+
+        // 2) 篡改成未知设备：资格门拦截（UnknownDevice）。
+        let mut stranger = pack.clone();
+        stranger.from_device_id = "stranger".to_string();
+        assert_eq!(b.unpack(&stranger, 1_500).unwrap_err(), SyncError::UnknownDevice);
+
+        // 3) 旧格式（无 from_device_id，serde 缺省空串）：资格门拦截。
+        let mut legacy = pack.clone();
+        legacy.from_device_id = String::new();
+        assert_eq!(b.unpack(&legacy, 1_500).unwrap_err(), SyncError::UnknownDevice);
+
+        // 4) 正常路径不回归。
+        assert_eq!(b.unpack(&pack, 1_500).unwrap(), envelope());
     }
 
     #[test]

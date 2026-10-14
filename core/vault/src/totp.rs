@@ -80,7 +80,10 @@ fn parse_seed(seed: &str) -> Result<(Zeroizing<Vec<u8>>, TotpParams), VaultError
         return Err(VaultError::Malformed);
     }
 
-    if trimmed.len() >= 10 && trimmed[..10].eq_ignore_ascii_case("otpauth://") {
+    // 非_ascii 安全的前缀检查：多字节字符绝不等价于 ASCII 的 "otpauth://"
+    // （审查报告 P1-2：原实现 `trimmed[..10]` 按字节切片，非 ASCII 种子在字符
+    // 中间切开即 panic——本 crate 生产路径禁 panic）。
+    if trimmed.len() >= 10 && trimmed.is_ascii() && trimmed[..10].eq_ignore_ascii_case("otpauth://") {
         let query = trimmed.splitn(2, '?').nth(1).ok_or(VaultError::Malformed)?;
         let mut secret_b32: Option<String> = None;
         let mut params = TotpParams::default();
@@ -137,9 +140,12 @@ fn base32_decode(text: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         if ch.is_whitespace() {
             continue;
         }
-        let value = match ch.to_ascii_uppercase() {
-            'A'..='Z' => ch as u32 - 'A' as u32,
-            '2'..='7' => ch as u32 - '2' as u32 + 26,
+        // RFC 4648 大小写不敏感：小写种子（'j' 等）必须与对应大写同值
+        // （审查报告 P1-1：原实现分支体误用原始 ch，小写会溢出 5-bit 位域）。
+        let upper = ch.to_ascii_uppercase();
+        let value = match upper {
+            'A'..='Z' => upper as u32 - 'A' as u32,
+            '2'..='7' => upper as u32 - '2' as u32 + 26,
             _ => return Err(VaultError::Malformed),
         };
         bits = (bits << 5) | value;
@@ -227,6 +233,27 @@ mod tests {
         assert_eq!(
             totp_code("otpauth://totp/test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&algorithm=MD5", 0)
                 .unwrap_err(),
+            VaultError::Malformed
+        );
+    }
+
+    #[test]
+    fn lowercase_base32_seed_decodes_identically() {
+        // P1-1：小写种子与对应大写同码（此前小写会静默解错）。
+        let upper = totp_code(SEED_SHA1, 59).unwrap();
+        let lower = totp_code(&SEED_SHA1.to_ascii_lowercase(), 59).unwrap();
+        assert_eq!(upper, lower);
+        assert_eq!(lower, "287082");
+    }
+
+    #[test]
+    fn non_ascii_seed_rejected_without_panic() {
+        // P1-2：非 ASCII 种子必须整体拒绝（Malformed），不得 panic。
+        assert_eq!(totp_code("秘密秘密秘密", 0).unwrap_err(), VaultError::Malformed);
+        assert_eq!(totp_code("对齐\u{4e2d}文", 0).unwrap_err(), VaultError::Malformed);
+        // 混合前缀（otpauth 头 + 非 ASCII 参数）正常走 URI 分支拒绝。
+        assert_eq!(
+            totp_code("otpauth://totp/test?secret=秘密", 0).unwrap_err(),
             VaultError::Malformed
         );
     }

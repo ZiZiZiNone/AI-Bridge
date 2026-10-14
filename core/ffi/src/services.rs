@@ -605,7 +605,9 @@ pub fn new_core(
     // `CoreConfig`：core 无配置面消费点（UDL 漂移，见 README），仅镜像签名。
     let _ = &config;
 
-    let sink: Arc<dyn audit::AuditSink> = Arc::new(audit::InMemoryAuditSink::new());
+    // 审计单例纪律：broker 与 AuditLog 共用**同一** sink 实例（审查报告 P1-6：
+    // 曾各建一个 InMemoryAuditSink，audit.query 永远查不到 broker 的签发/吊销事件）。
+    let sink: Arc<audit::InMemoryAuditSink> = Arc::new(audit::InMemoryAuditSink::new());
 
     // broker 句柄查表键：UDL 无主密钥注入面，以注入 Entropy 生成一次性主密钥（shim）。
     let broker_service = (|| -> Result<broker::BrokerService, CoreError> {
@@ -651,6 +653,6 @@ pub fn new_core(
             clock,
         }),
         converter_host: Arc::new(ConverterHost),
-        audit: Arc::new(AuditLog { sink: Arc::new(audit::InMemoryAuditSink::new()) }),
+        audit: Arc::new(AuditLog { sink: sink.clone() }),
     })
 }

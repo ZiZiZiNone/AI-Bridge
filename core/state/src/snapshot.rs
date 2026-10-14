@@ -36,11 +36,16 @@ impl<S: StateStore, C: Clock, R: SessionSource> StateService<S, C, R> {
         let meta = snapshot.meta();
         self.store.save_snapshot(snapshot)?;
 
+        // 被覆盖 = 该端在旧集合中的条目数（filter 掉的那部分；审查报告 P2：
+        // 原实现统计的是滤除后保留的 merged.len()，与 model.rs 语义相反）。
+        let replaced_entries = previous
+            .iter()
+            .filter(|entry| &entry.endpoint == endpoint)
+            .count();
         let mut merged: Vec<SessionEntry> = previous
             .into_iter()
             .filter(|entry| &entry.endpoint != endpoint)
             .collect();
-        let replaced_entries = merged.len();
         merged.extend(incoming);
         self.store.replace_sessions(canonicalize(merged))?;
 

@@ -172,12 +172,24 @@ impl<S: StateStore, C: Clock, R: SessionSource> StateService<S, C, R> {
 
     /// 按目标查会话（含 payload）：消费方为 ab-broker 代持（ab-mcp `acquire_session`）
     /// 与宿主注入；同站多账号并存时返回全部候选，由调用方消歧。
+    ///
+    /// 到期过滤（审查报告 P1-4）：已过期会话不进入代持候选——过期 cookie/token
+    /// 注入必然失败，且 `SessionEnvelope::validate` 无 now 参救不了下游。
+    /// 无到期时间的会话（如会话 cookie）不过滤。
     pub fn sessions_for_target(&self, target: &Target) -> Result<Vec<SessionEntry>, StateError> {
+        let now = self.clock.now_unix_secs();
         let entries = self.store.load_sessions()?;
-        Ok(entries
-            .into_iter()
-            .filter(|entry| target_matches(&entry.record.target, target))
-            .collect())
+        let mut kept = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !target_matches(&entry.record.target, target) {
+                continue;
+            }
+            // 非法到期时间戳按 InvalidEntry 上抛（不静默当未过期）。
+            if entry.expires_at_secs()?.map(|expiry| expiry > now).unwrap_or(true) {
+                kept.push(entry);
+            }
+        }
+        Ok(kept)
     }
 }
 
@@ -452,5 +464,72 @@ mod tests {
                 value: "2026-13-01T00:00:00Z".to_string()
             })
         );
+    }
+
+    #[test]
+    fn sessions_for_target_drops_expired_keeps_live_and_open_ended() {
+        // 审查报告 P1-4：过期真会话不得进入代持候选。
+        let store = store_with(vec![
+            entry_full(
+                EndpointKind::Browser,
+                "chromium",
+                "acc-a",
+                "github.com",
+                Some(T_MINUS_1), // 过期
+                SourceType::Extension,
+                "chromium",
+            ),
+            entry_full(
+                EndpointKind::Browser,
+                "edge",
+                "acc-b",
+                "github.com",
+                Some(T_PLUS_100), // 未过期
+                SourceType::Extension,
+                "edge",
+            ),
+            entry_full(
+                EndpointKind::Mobile,
+                "ios",
+                "acc-c",
+                "github.com",
+                None, // 无到期时间（会话 cookie）
+                SourceType::Mobile,
+                "ios",
+            ),
+        ]);
+        let svc = service(store, Vec::new(), BASE, policy());
+        let target = Target {
+            kind: TargetKind::Web,
+            domain: Some("github.com".to_string()),
+            app_id: None,
+        };
+        let picked = svc.sessions_for_target(&target).unwrap();
+        let accounts: Vec<&str> = picked
+            .iter()
+            .map(|e| e.record.account_ref.as_str())
+            .collect();
+        assert_eq!(accounts, ["acc-b", "acc-c"], "过期 acc-a 必须被滤掉");
+    }
+
+    #[test]
+    fn sessions_for_target_rejects_bad_expiry_like_matrix() {
+        // 非法到期时间戳：与 matrix 同口径上抛 InvalidEntry，不静默放行。
+        let store = InMemoryStateStore::new();
+        let bad = SessionEntry::new(
+            Endpoint::new(EndpointKind::Browser, "chromium"),
+            record("acc-a", "github.com", Some("not-a-time")),
+        );
+        store.replace_sessions(vec![bad]).expect("写入失败");
+        let svc = service(store, Vec::new(), BASE, policy());
+        let target = Target {
+            kind: TargetKind::Web,
+            domain: Some("github.com".to_string()),
+            app_id: None,
+        };
+        assert!(matches!(
+            svc.sessions_for_target(&target),
+            Err(StateError::InvalidEntry { .. })
+        ));
     }
 }

@@ -301,19 +301,21 @@ impl BrokerService {
             Ok(ttl) => ttl,
             Err(err) => return Err(self.deny(who, when, AuditAction::Issue, err, Some(real))),
         };
-        if real.target.kind == TargetKind::Web
-            && !domain_covered(
-                &request.scope.domain_allowlist,
-                real.target.domain.as_deref().unwrap_or_default(),
-            )
-        {
-            return Err(self.deny(
-                who,
-                when,
-                AuditAction::Issue,
-                BrokerError::TargetNotInScope,
-                Some(real),
-            ));
+        if real.target.kind == TargetKind::Web {
+            let domain = real.target.domain.as_deref().unwrap_or_default();
+            // 双向校验：目标必须被白名单覆盖，且白名单不得比目标更宽
+            //（审查报告 P1-3：`["com"]` 这类超集白名单会使 C4.1 形同虚设）。
+            if !domain_covered(&request.scope.domain_allowlist, domain)
+                || !allowlist_narrows_target(&request.scope.domain_allowlist, domain)
+            {
+                return Err(self.deny(
+                    who,
+                    when,
+                    AuditAction::Issue,
+                    BrokerError::TargetNotInScope,
+                    Some(real),
+                ));
+            }
         }
 
         let mut id_bytes = [0u8; 16];
@@ -733,17 +735,41 @@ fn check_scope(scope: &ScopeSpec) -> Result<(), BrokerError> {
 
 /// 域名覆盖：精确相等或子域（`a.b.example.com` 被 `example.com` 覆盖）。
 fn domain_covered(allowlist: &[String], domain: &str) -> bool {
-    let d = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let d = normalize_domain(domain);
     if d.is_empty() {
         return false;
     }
-    allowlist.iter().any(|entry| {
-        let e = entry
-            .trim()
-            .trim_start_matches('.')
-            .trim_end_matches('.')
-            .to_ascii_lowercase();
-        !e.is_empty() && (d == e || d.ends_with(&format!(".{e}")))
+    allowlist.iter().any(|entry| subdomain_covers(entry, &d))
+}
+
+/// 规范化域名：去空白、去首尾点、小写。
+fn normalize_domain(domain: &str) -> String {
+    domain
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+/// 白名单项 `entry` 是否合法覆盖目标域 `domain`（相等或目标是其子域）。
+fn subdomain_covers(entry: &str, domain: &str) -> bool {
+    let e = normalize_domain(entry);
+    !e.is_empty() && (domain == e || domain.ends_with(&format!(".{e}")))
+}
+
+/// 白名单项是否为 `domain` 的祖先超集（如 `com` 对 `github.com`）。
+/// C4.1 fail-closed：AI 请求的白名单只允许收窄（目标域或其子域），
+/// 不允许把范围放大到目标的父域/公共后缀——否则 scope 形同虚设。
+fn allowlist_narrows_target(allowlist: &[String], domain: &str) -> bool {
+    let d = normalize_domain(domain);
+    if d.is_empty() {
+        return false;
+    }
+    // 收窄 = entry 是目标本身，或 entry 是目标的子域（entry 在目标之下）。
+    // entry 是目标的父域/后缀（目标在 entry 之下）即为超集，拒绝。
+    allowlist.iter().all(|entry| {
+        let e = normalize_domain(entry);
+        e == d || (e.ends_with(&format!(".{d}")) && !d.ends_with(&format!(".{e}")))
     })
 }
 
@@ -912,6 +938,55 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].result, AuditResult::Denied);
         assert_eq!(events[0].detail.get("reason").unwrap(), "target_not_in_scope");
+    }
+
+    #[test]
+    fn issue_rejects_wider_allowlist_than_target() {
+        // P1-3：白名单不得比目标（github.com）更宽。
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
+        for domains in [
+            vec!["com"],
+            vec!["github.com", "com"],
+            vec!["hub.com"],
+            vec!["github.com.evil.test"],
+        ] {
+            let err = broker
+                .issue(
+                    "ai-client",
+                    &web_envelope(),
+                    IssueRequest {
+                        scope: scope(&domains, false, false),
+                        ttl_secs: None,
+                    },
+                    &OsEntropy,
+                    NOW,
+                )
+                .unwrap_err();
+            assert_eq!(err, BrokerError::TargetNotInScope, "白名单 {domains:?} 必须被拒");
+        }
+
+        // 合法收窄仍通过：目标本身或其子域。
+        for domains in [
+            vec!["github.com"],
+            vec!["github.com", "api.github.com"],
+        ] {
+            assert!(
+                broker
+                    .issue(
+                        "ai-client",
+                        &web_envelope(),
+                        IssueRequest {
+                            scope: scope(&domains, false, false),
+                            ttl_secs: None,
+                        },
+                        &OsEntropy,
+                        NOW,
+                    )
+                    .is_ok(),
+                "合法白名单 {domains:?} 必须通过"
+            );
+        }
     }
 
     #[test]

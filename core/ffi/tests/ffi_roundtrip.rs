@@ -267,6 +267,25 @@ fn audit_roundtrip_via_ffi_shapes() {
 }
 
 #[test]
+fn broker_and_audit_share_one_sink() {
+    // 审查报告 P1-6：broker 与 AuditLog 必须共用同一 sink，否则
+    // audit.query 永远查不到 broker 侧的签发/吊销审计。
+    let (core, _store, _clock) = fixture_core();
+    let before = core.audit().query(AuditFilter::default()).len();
+
+    // renew 不存在的会话 → broker 审计一条 Denied（fail-closed 链路）。
+    assert!(core.broker().renew("nope".into(), 600).is_err());
+
+    let after = core.audit().query(AuditFilter::default());
+    assert_eq!(
+        after.len(),
+        before + 1,
+        "broker 的审计事件必须出现在 audit.query 结果里"
+    );
+    assert_eq!(after.last().unwrap().action, AuditAction::RENEW);
+}
+
+#[test]
 fn sync_unpack_rejects_garbage_and_state_is_payload_free() {
     let (core, _store, _clock) = fixture_core();
     // 垃圾字节：CONVERSION 错误，不 panic。

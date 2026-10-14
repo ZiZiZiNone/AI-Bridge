@@ -330,14 +330,23 @@ mod tests {
         rewound.issued_at_secs = 0;
         assert!(matches!(b.unpack(&rewound, 1_500), Err(SyncError::Crypto(_))), "篡改签发时间必须拒解");
 
-        // 非收件设备的私钥解不开（A8.1 对端公钥加密）。
+        // 非收件设备解不开（A8.1 对端公钥加密 + P1-5 发送方资格门）：
+        // outsider 的配对表为空 → 先撞发送方资格门（UnknownDevice），
+        // 即便配对表放行，AEAD 也会因 DH 密钥不同而解密失败（Crypto）。
         let outsider = SyncService::new(
             SyncIdentity::generate("fixture-device-c", &OsEntropy).unwrap(),
             vec![],
         );
         assert!(
-            matches!(outsider.unpack(&pack, 1_500), Err(SyncError::Crypto(_))),
-            "非收件设备必须拒解"
+            matches!(outsider.unpack(&pack, 1_500), Err(SyncError::UnknownDevice)),
+            "未配对设备必须在解密前被拒（P1-5）"
+        );
+        // 篡改发送方名义指向「假配对」也拦：AAD 绑定 from_device_id。
+        let mut forged_sender = pack.clone();
+        forged_sender.from_device_id = "fixture-device-b".to_string();
+        assert!(
+            matches!(b.unpack(&forged_sender, 1_500), Err(SyncError::UnknownDevice)),
+            "伪造发送方名义（b 表中无此设备）必须被资格门拦下"
         );
 
         // 拒绝路径全部不产出信封（无半解密）：错误输出不含任何秘密字段。
