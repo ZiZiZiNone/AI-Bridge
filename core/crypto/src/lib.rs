@@ -8,15 +8,19 @@
 use aes_gcm::aead::{Aead, Payload as AeadPayload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20::cipher::{KeyIvInit, StreamCipher};
+use chacha20::ChaCha20;
 use ed25519_dalek::{Signer, Signature, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha1::Sha1;
+use sha2::{Digest, Sha256, Sha512};
 use subtle::ConstantTimeEq;
-use zeroize::Zeroizing;
+pub use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
+type HmacSha1 = Hmac<Sha1>;
 
 /// `Display` 只输出固定文案：密钥/明文/密文材料不进错误信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +273,66 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// AES-256-CBC（PKCS#7）：KDBX4 外层加密。
+pub fn aes256_cbc_encrypt(key: &[u8; 32], iv: &[u8; 16], plaintext: &[u8]) -> Vec<u8> {
+    use aes::Aes256;
+    use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    cbc::Encryptor::<Aes256>::new(key.into(), iv.into())
+        .encrypt_padded_vec_mut::<Pkcs7>(plaintext)
+}
+
+/// 解密失败（篡改/错钥/错 IV）一律 [`CryptoError::AuthenticationFailed`]。
+pub fn aes256_cbc_decrypt(
+    key: &[u8; 32],
+    iv: &[u8; 16],
+    ciphertext: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    use aes::Aes256;
+    use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    let plain = cbc::Decryptor::<Aes256>::new(key.into(), iv.into())
+        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .map_err(|_| CryptoError::AuthenticationFailed)?;
+    Ok(Zeroizing::new(plain))
+}
+
+pub fn sha512(data: &[u8]) -> [u8; 64] {
+    let mut hasher = Sha512::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
+pub fn hmac_sha1(key: &[u8], message: &[u8]) -> Result<[u8; 20], CryptoError> {
+    let mut mac = HmacSha1::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength)?;
+    mac.update(message);
+    Ok(mac.finalize().into_bytes().into())
+}
+
+/// 一次性 ChaCha20（计数器 0 起）。
+pub fn chacha20_xor(key: &[u8; 32], nonce: &[u8; 12], data: &[u8]) -> Vec<u8> {
+    let mut out = data.to_vec();
+    let mut cipher = ChaCha20::new(key.into(), nonce.into());
+    cipher.apply_keystream(&mut out);
+    out
+}
+
+/// 连续密钥流（KDBX 内部保护值流）：多次调用共享同一条流。
+pub struct ChaCha20Stream {
+    cipher: ChaCha20,
+}
+
+impl ChaCha20Stream {
+    /// key/nonce 来自 `sha512(stream_key)` 切片（KDBX 约定）。
+    pub fn new(key: &[u8; 32], nonce: &[u8; 12]) -> Self {
+        Self {
+            cipher: ChaCha20::new(key.into(), nonce.into()),
+        }
+    }
+
+    pub fn apply(&mut self, data: &mut [u8]) {
+        self.cipher.apply_keystream(data);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +466,35 @@ mod tests {
         let mut odd_pk = [0u8; 32];
         odd_pk[31] = 0xff;
         let _ = ed25519_verify(&odd_pk, b"", &[0u8; 64]);
+    }
+
+    #[test]
+    fn aes_cbc_roundtrip_and_tamper() {
+        let key = [7u8; 32];
+        let iv = [9u8; 16];
+        let pt = b"KDBX payload";
+        let ct = aes256_cbc_encrypt(&key, &iv, pt);
+        assert_eq!(aes256_cbc_decrypt(&key, &iv, &ct).unwrap().as_slice(), pt);
+
+        let mut bad = ct.clone();
+        bad[0] ^= 0x01;
+        assert_eq!(
+            aes256_cbc_decrypt(&key, &iv, &bad),
+            Err(CryptoError::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn chacha20_stream_is_sequential() {
+        let key = [1u8; 32];
+        let nonce = [2u8; 12];
+        let mut full = b"0123456789abcdef".to_vec();
+        let mut split = full.clone();
+        let oneshot = chacha20_xor(&key, &nonce, &full);
+        let mut stream = ChaCha20Stream::new(&key, &nonce);
+        stream.apply(&mut split[..7]);
+        stream.apply(&mut split[7..]);
+        full = oneshot.clone();
+        assert_eq!(full, split, "连续流与一次性结果必须一致");
     }
 }

@@ -1,0 +1,12 @@
+[package]
+name = "ab-vault"
+version.workspace = true
+edition.workspace = true
+description = "KDBX4 格式级兼容加密库：条目 / 回收站，存储经 VaultStore 注入"
+
+[dependencies]
+ab-contract = { path = "../contract" }
+ab-crypto = { path = "../crypto" }
+base64 = "0.23"
+flate2 = "1.1"
+quick-xml = "0.42"
