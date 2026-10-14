@@ -127,6 +127,7 @@ pub enum DomainLabel {
     Mac,
     SyncPair,
     RecoveryPack,
+    RecoveryKey,
     BrokerToken,
 }
 
@@ -138,6 +139,7 @@ impl DomainLabel {
             DomainLabel::Mac => b"aibridge/v1/mac",
             DomainLabel::SyncPair => b"aibridge/v1/sync-pair",
             DomainLabel::RecoveryPack => b"aibridge/v1/recovery-pack",
+            DomainLabel::RecoveryKey => b"aibridge/v1/recovery-key",
             DomainLabel::BrokerToken => b"aibridge/v1/broker-token",
         }
     }
@@ -387,6 +389,7 @@ mod tests {
             DomainLabel::Mac,
             DomainLabel::SyncPair,
             DomainLabel::RecoveryPack,
+            DomainLabel::RecoveryKey,
             DomainLabel::BrokerToken,
         ] {
             keys.push(derive_domain(&ikm, None, label).expect("派生失败"));

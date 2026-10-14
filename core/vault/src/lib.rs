@@ -7,7 +7,7 @@ mod xml;
 use std::fmt;
 
 use ab_contract::CredentialKind;
-use ab_crypto::{random_bytes, Entropy, KdfParams, Zeroizing};
+use ab_crypto::{derive_domain, random_bytes, DomainLabel, Entropy, KdfParams, Zeroizing};
 
 pub use kdbx::KdbxError;
 
@@ -15,7 +15,7 @@ const REDACTED: &str = "[REDACTED]";
 const ROOT_GROUP: &str = "Root";
 const RECYCLE_BIN_GROUP: &str = "Recycle Bin";
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultError {
     Store,
     Kdbx(KdbxError),
@@ -253,6 +253,64 @@ pub struct VaultSession {
     kdf: KdfParams,
 }
 
+/// 恢复密钥（S3「唯一后门」）：初始化一次性生成、只展示一次、离线保存。
+/// 它是 A6.4「恢复密钥加密副本」的口令来源——副本不需要主口令即可恢复（A6.9）。
+/// 秘密 `Zeroizing` 持有；展示一次是 UI 纪律，core 不拦重复调用。
+pub struct RecoveryKey(Zeroizing<[u8; 32]>);
+
+impl RecoveryKey {
+    pub fn generate(entropy: &dyn Entropy) -> Result<Self, VaultError> {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        random_bytes(entropy, bytes.as_mut()).map_err(|_| VaultError::Malformed)?;
+        Ok(Self(bytes))
+    }
+
+    /// 离线保存的展示形态：64 位小写 hex，按 8 位分组。
+    pub fn display(&self) -> String {
+        let hex: String = self.0.iter().map(|b| format!("{b:02x}")).collect();
+        hex.as_bytes()
+            .chunks(8)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// 从展示形态恢复（忽略空白）；长度或字符非法整体拒绝。
+    pub fn from_display(text: &str) -> Result<Self, VaultError> {
+        let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        if cleaned.len() != 64 {
+            return Err(VaultError::Malformed);
+        }
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        for (i, slot) in bytes.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(
+                cleaned.get(2 * i..2 * i + 2).ok_or(VaultError::Malformed)?,
+                16,
+            )
+            .map_err(|_| VaultError::Malformed)?;
+        }
+        Ok(Self(bytes))
+    }
+
+    /// A6.9 恢复路径：用恢复密钥打开 A6.4 加密副本（不需要主口令）。
+    pub fn open_copy(&self, data: &[u8]) -> Result<VaultSession, VaultError> {
+        let material = self.password_material()?;
+        VaultSession::from_backup(&*material, data)
+    }
+
+    /// KDBX 口令材料：域分离派生（`aibridge/v1/recovery-key`），与主口令路径永不混用。
+    fn password_material(&self) -> Result<Zeroizing<[u8; 32]>, VaultError> {
+        derive_domain(&*self.0, None, DomainLabel::RecoveryKey).map_err(|_| VaultError::Malformed)
+    }
+}
+
+// 手工 Debug：恢复密钥脱敏（F7 内存卫生）。
+impl fmt::Debug for RecoveryKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RecoveryKey [REDACTED]")
+    }
+}
+
 impl VaultSession {
     pub fn create(
         name: &str,
@@ -274,7 +332,12 @@ impl VaultSession {
 
     pub fn unlock(store: &mut dyn VaultStore, password: &[u8]) -> Result<Self, VaultError> {
         let data = store.read()?.ok_or(VaultError::NotFound)?;
-        let unpacked = kdbx::unpack(password, &data)?;
+        Self::from_backup(password, &data)
+    }
+
+    /// 从备份字节解锁（口令路径与恢复路径共用的核心入口）。
+    pub fn from_backup(password: &[u8], data: &[u8]) -> Result<Self, VaultError> {
+        let unpacked = kdbx::unpack(password, data)?;
         let mut stream = xml::protected_stream(&unpacked.stream_key)?;
         let body = std::str::from_utf8(&unpacked.body).map_err(|_| VaultError::Malformed)?;
         let vault = xml::parse_document(body, &mut stream)?;
@@ -295,6 +358,31 @@ impl VaultSession {
         let bytes =
             kdbx::repack(&self.kdf, &self.salt, &self.transformed, &stream_key, &body, entropy)?;
         store.write(&bytes)
+    }
+
+    /// A6.4 恢复密钥加密副本：同一库内容、独立盐与流密钥，口令 = 恢复密钥域派生材料。
+    /// 与主备份并列存放（主备份仍用主口令）；两端都永不落明文。
+    pub fn recovery_copy(
+        &self,
+        recovery: &RecoveryKey,
+        entropy: &dyn Entropy,
+    ) -> Result<Vec<u8>, VaultError> {
+        let mut stream_key = Zeroizing::new([0u8; 64]);
+        random_bytes(entropy, stream_key.as_mut()).map_err(|_| VaultError::Malformed)?;
+        let mut stream = xml::protected_stream(&stream_key)?;
+        let body = xml::write_document(&self.vault, &mut stream)?;
+        let mut salt = Zeroizing::new([0u8; 32]);
+        random_bytes(entropy, salt.as_mut()).map_err(|_| VaultError::Malformed)?;
+        let material = recovery.password_material()?;
+        let transformed = kdbx::transformed_key(&*material, &salt, &self.kdf)?;
+        Ok(kdbx::repack(
+            &self.kdf,
+            &salt,
+            &transformed,
+            &stream_key,
+            &body,
+            entropy,
+        )?)
     }
 }
 
@@ -468,5 +556,73 @@ mod tests {
         assert_eq!(entry.secret.as_deref(), Some("db-pass"));
         assert_eq!(entry.username.as_deref(), Some("alice & bob"));
         let _ = &entropy;
+    }
+
+    #[test]
+    fn recovery_key_display_roundtrips() {
+        let entropy = OsEntropy;
+        let key = RecoveryKey::generate(&entropy).unwrap();
+        let shown = key.display();
+        assert_eq!(shown.len(), 64 + 7, "64 位 hex + 7 个分组空格");
+        assert_eq!(RecoveryKey::from_display(&shown).unwrap().display(), shown);
+        assert_eq!(RecoveryKey::from_display("zz").unwrap_err(), VaultError::Malformed);
+        assert_eq!(
+            RecoveryKey::from_display("").unwrap_err(),
+            VaultError::Malformed
+        );
+    }
+
+    #[test]
+    fn recovery_copy_opens_without_master_password() {
+        let entropy = OsEntropy;
+        let mut session = VaultSession::create("v", b"master-pw", &FAST_KDF, &entropy).unwrap();
+        let entry = sample_entry(&entropy);
+        let uuid = entry.uuid;
+        session.vault.add(entry.clone()).unwrap();
+
+        let recovery = RecoveryKey::generate(&entropy).unwrap();
+        let copy = session.recovery_copy(&recovery, &entropy).unwrap();
+
+        // A6.9 恢复路径：不需要主口令，逐字段一致。
+        let restored = recovery.open_copy(&copy).unwrap();
+        assert_eq!(restored.vault.find(&uuid), Some(&entry));
+        assert_eq!(restored.vault.name, "v");
+
+        // 两路互不混用：主口令开不了副本，恢复密钥开不了主备份。
+        assert!(matches!(
+            VaultSession::from_backup(b"master-pw", &copy),
+            Err(VaultError::Kdbx(KdbxError::BadCredentials))
+        ));
+        let mut store = MemoryStore(None);
+        session.save(&mut store, &entropy).unwrap();
+        let main = store.0.clone().unwrap();
+        assert_ne!(copy, main, "副本必须独立成盐/流密钥，不是主备份的拷贝");
+        let other = RecoveryKey::generate(&entropy).unwrap();
+        assert!(other.open_copy(&main).is_err());
+        assert!(recovery.open_copy(&main).is_err());
+    }
+
+    #[test]
+    fn corrupted_recovery_copy_rejected_whole() {
+        let entropy = OsEntropy;
+        let mut session = VaultSession::create("v", b"pw", &FAST_KDF, &entropy).unwrap();
+        session.vault.add(sample_entry(&entropy)).unwrap();
+        let recovery = RecoveryKey::generate(&entropy).unwrap();
+        let copy = session.recovery_copy(&recovery, &entropy).unwrap();
+
+        for offset in [0usize, 1, copy.len() / 2, copy.len() - 1] {
+            let mut bad = copy.clone();
+            bad[offset] ^= 0x01;
+            assert!(recovery.open_copy(&bad).is_err(), "偏移 {offset} 篡改必须整体拒绝");
+        }
+    }
+
+    #[test]
+    fn recovery_key_debug_redacts() {
+        let entropy = OsEntropy;
+        let key = RecoveryKey::generate(&entropy).unwrap();
+        let dbg = format!("{key:?}");
+        assert!(dbg.contains(REDACTED));
+        assert!(!dbg.contains(&key.display().replace(' ', "")));
     }
 }
