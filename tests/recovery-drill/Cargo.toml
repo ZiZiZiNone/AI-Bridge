@@ -1,0 +1,15 @@
+[package]
+name = "recovery-drill-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "恢复演练（A6.8）：沙盒恢复比对条目数/完整性；损坏与错口令整体拒绝（安全模型 §3）；A8 离线包过期/篡改拒解（A6.9/A8.3）"
+
+# 独立 crate：显式脱离根 workspace（根 members 仅 core/*），不改动根清单。
+[workspace]
+
+[dev-dependencies]
+ab-contract = { path = "../../core/contract" }
+ab-crypto = { path = "../../core/crypto" }
+ab-vault = { path = "../../core/vault" }
+ab-sync = { path = "../../core/sync" }
