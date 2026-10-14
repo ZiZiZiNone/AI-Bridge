@@ -1,0 +1,16 @@
+{
+    "manifest_version": 2,
+    "name": "AI-Bridge",
+    "display_name": "AI-Bridge",
+    "version": "1.0",
+    "description": "AI-Bridge 会话桥：读取 / 注入 cookie（含 HttpOnly 与完整属性）。",
+    "permissions": ["cookies", "storage", "<all_urls>"],
+    "background": {
+        "scripts": ["background.js"]
+    },
+    "browser_specific_settings": {
+        "safari": {
+            "strict_min_version": "18.0"
+        }
+    }
+}

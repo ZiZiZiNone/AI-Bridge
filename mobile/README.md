@@ -11,14 +11,15 @@
 mobile/
 ├─ README.md                     本文件：工程生成方式与构建前置
 ├─ ios/
-│  ├─ App/                       SwiftUI App 壳（薄入口）+ M1–M9 页面空壳
+│  ├─ app/                        SwiftUI App（薄入口）+ M1–M8 页面 + 组合根
 │  │  ├─ AIBridgeApp.swift       @main 入口 + 组合根装配点
 │  │  ├─ AppEnvironment.swift    组合根依赖集合（构造注入，无单例）
 │  │  ├─ RootView.swift          M2 主屏：底部五 tab（库/生成器/浏览器/设备/设置）
-│  │  └─ Pages/PageScaffold.swift + M1–M9 九个页面空壳
-│  ├─ CredentialProvider/        M9 系统层：Credential Provider 扩展（含 Info.plist）
-│  ├─ SafariWebExtension/        Safari 扩展 handler 骨架（含 Info.plist）
-│  └─ WebViewContainer/          WKWebView 容器 + 会话搬运（实现 core 的 SessionSource）
+│  │  ├─ Pages/                  M1–M8 页面（PageScaffold + 各页面）
+│  │  ├─ WebView/                WKWebView 容器 + 会话搬运（实现 core 的 SessionSource）
+│  │  └─ Core/                   宿主 trait 实现（KeychainVaultStore/时钟/熵/局域网传输）
+│  ├─ credential-provider/       M9：Credential Provider 扩展（含 Info.plist）
+│  └─ safari-ext/                Safari 扩展 handler + 会话桥（含 Info.plist）
 ├─ android/
 │  └─ app/src/main/
 │     ├─ AndroidManifest.xml     宿主 + 两个系统服务声明
@@ -39,21 +40,21 @@ mobile/
 
 ### 路径映射说明（与 `docs/目录结构.md` §3 的差异）
 
-`docs/目录结构.md` 把移动 UI 归为 `mobile/app/`（ios/android 两组）。本任务按交付指令把 UI 层与各平台树同置：SwiftUI App 壳在 `mobile/ios/App/`，Compose 页面壳在 `mobile/android/app/src/main/java/com/aibridge/mobile/ui/`。**同一实现全仓只写一份**，故不再另建 `mobile/app/` 目录（避免重复实现或纯转发层）。若后续需要对齐文档字面路径，移动 `App` 目录即可，代码内部无路径假设。
+`docs/目录结构.md` 把移动 UI 归为 `mobile/app/`（ios/android 两组）。本任务按交付指令把 UI 层与各平台树同置：SwiftUI App 壳在 `mobile/ios/app/`，Compose 页面壳在 `mobile/android/app/src/main/java/com/aibridge/mobile/ui/`。**同一实现全仓只写一份**，故不再另建 `mobile/app/` 目录（避免重复实现或纯转发层）。若后续需要对齐文档字面路径，移动 `app` 目录即可，代码内部无路径假设。
 
 ## 2. 界面清单落点（M1–M9，见 `docs/功能点全景.md` §3.3）
 
 | # | 界面 | iOS | Android |
 |---|---|---|---|
-| M1 | 锁屏 / 解锁 | `ios/App/Pages/UnlockView.swift` | `.../ui/pages/UnlockScreen.kt` |
-| M2 | 库列表 + 搜索（主屏五 tab） | `ios/App/Pages/VaultListView.swift` + `App/RootView.swift` | `.../ui/pages/VaultListScreen.kt` + `ui/RootNav.kt` |
-| M3 | 条目详情 + 编辑表单 | `ios/App/Pages/EntryDetailView.swift` | `.../ui/pages/EntryDetailScreen.kt` |
-| M4 | 生成器（默认 20 位 · 不存历史） | `ios/App/Pages/GeneratorView.swift` | `.../ui/pages/GeneratorScreen.kt` |
-| M5 | 容器浏览器（全屏 WebView） | `ios/App/Pages/ContainerBrowserView.swift` + `ios/WebViewContainer/` | `.../ui/pages/ContainerBrowserScreen.kt` + `.../webview/` |
-| M6 | 状态 / 临时会话 | `ios/App/Pages/SessionStatusView.swift` | `.../ui/pages/SessionStatusScreen.kt` |
-| M7 | 配对与设备（含指纹确认屏） | `ios/App/Pages/PairingView.swift` | `.../ui/pages/PairingScreen.kt` |
-| M8 | 备份与设置 | `ios/App/Pages/SettingsBackupView.swift` | `.../ui/pages/SettingsBackupScreen.kt` |
-| M9 | 系统自动填充 UI（系统层） | `ios/CredentialProvider/` | `.../autofill/` + `.../credential/` |
+| M1 | 锁屏 / 解锁 | `ios/app/Pages/UnlockView.swift` | `.../ui/pages/UnlockScreen.kt` |
+| M2 | 库列表 + 搜索（主屏五 tab） | `ios/app/Pages/VaultListView.swift` + `app/RootView.swift` | `.../ui/pages/VaultListScreen.kt` + `ui/RootNav.kt` |
+| M3 | 条目详情 + 编辑表单 | `ios/app/Pages/EntryDetailView.swift` | `.../ui/pages/EntryDetailScreen.kt` |
+| M4 | 生成器（默认 20 位 · 不存历史） | `ios/app/Pages/GeneratorView.swift` | `.../ui/pages/GeneratorScreen.kt` |
+| M5 | 容器浏览器（全屏 WebView） | `ios/app/Pages/ContainerBrowserView.swift` + `ios/app/WebView/` | `.../ui/pages/ContainerBrowserScreen.kt` + `.../webview/` |
+| M6 | 状态 / 临时会话 | `ios/app/Pages/SessionStatusView.swift` | `.../ui/pages/SessionStatusScreen.kt` |
+| M7 | 配对与设备（含指纹确认屏） | `ios/app/Pages/PairingView.swift` | `.../ui/pages/PairingScreen.kt` |
+| M8 | 备份与设置 | `ios/app/Pages/SettingsBackupView.swift` | `.../ui/pages/SettingsBackupScreen.kt` |
+| M9 | 系统自动填充 UI（系统层） | `ios/credential-provider/` | `.../autofill/` + `.../credential/` |
 
 文案口径：同步项只写「设备同步（局域网）」，不出现"云同步"；设备仅 Windows / iOS / Android；条目仅账号密码 / passkey / TOTP，不含支付信息与身份分类。
 
@@ -77,7 +78,7 @@ mobile/
 工程生成（不手写工程文件）：
 
 1. Xcode → File → New → Project → iOS → App：Product Name `AIBridge`，Display Name `AI-Bridge`，Interface = SwiftUI，Minimum Deployment = iOS 18.0。
-2. 删除模板生成的 `ContentView.swift` / `AIBridgeApp.swift`，把 `mobile/ios/App/` 全部源码加入 App target（`AIBridgeApp.swift` 即入口）。
+2. 删除模板生成的 `ContentView.swift` / `AIBridgeApp.swift`，把 `mobile/ios/app/` 全部源码加入 App target（`AIBridgeApp.swift` 即入口）。
 3. 新建 target：iOS → Credential Provider Extension，源码指向 `mobile/ios/CredentialProvider/`，Info.plist 使用目录内已备文件；再新建 Safari Web Extension handler target，源码指向 `mobile/ios/SafariWebExtension/`（Web 资源包随该 target 提供，本任务只交付 handler 骨架）。
 4. 加入 UniFFI 生成的 Swift 绑定与静态库（§6），并在 target 的 `Build Settings → Framework Search Paths` 指向绑定产物目录。生成物不入库。
 5. 运行：真机 → 设置 → 密码 → 密码选项 → 启用 AI-Bridge（Credential Provider）；Safari → 扩展 → 启用 AI-Bridge。

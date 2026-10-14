@@ -47,3 +47,4 @@ desktop.ini
 *.p12
 *.kdbx
 *.aibvault
+.acl-recovery/
