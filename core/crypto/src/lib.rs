@@ -255,6 +255,12 @@ pub fn x25519_keypair(entropy: &dyn Entropy) -> Result<(Zeroizing<[u8; 32]>, [u8
     Ok((sk, public.to_bytes()))
 }
 
+/// 由既有私钥导出公钥（持久化恢复身份等场景）。
+pub fn x25519_public(secret_key: &[u8; 32]) -> [u8; 32] {
+    let secret = x25519_dalek::StaticSecret::from(*secret_key);
+    x25519_dalek::PublicKey::from(&secret).to_bytes()
+}
+
 /// 共享秘密 `Zeroizing` 承载。
 pub fn x25519_dh(
     secret_key: &[u8; 32],
@@ -458,6 +464,13 @@ mod tests {
         let s1 = x25519_dh(&sk1, &pk2).expect("协商失败");
         let s2 = x25519_dh(&sk2, &pk1).expect("协商失败");
         assert_eq!(s1.as_ref(), s2.as_ref());
+    }
+
+    #[test]
+    fn x25519_public_derives_from_secret() {
+        let e = TestEntropy(11);
+        let (sk, pk) = x25519_keypair(&e).expect("密钥生成失败");
+        assert_eq!(x25519_public(&sk), pk, "同私钥必须导出同一公钥");
     }
 
     #[test]

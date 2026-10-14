@@ -1,0 +1,11 @@
+[package]
+name = "ab-sync"
+version.workspace = true
+edition.workspace = true
+description = "配对与传输：X25519 指纹配对 · 局域网 E2E 直传 · A8 离线传送包（传输必须注入，无中继/云）"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ab-contract = { path = "../contract" }
+ab-crypto = { path = "../crypto" }
