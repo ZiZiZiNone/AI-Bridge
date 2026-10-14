@@ -11,6 +11,21 @@ AI-Bridge 工程脚本（docs/架构与契约.md §3 表格 `tools/` 行：**构
 
 目录内既有产物（本次未改动）：`contract-check/`（Node 夹具级校验）、`fetch-vendor.py`（cargo 离线依赖）。
 
+### fetch-vendor.py（2026-10-12 增补两个参数）
+
+cargo 直连 crates.io 在本机失败（schannel 凭证错误），本工具经 Python/OpenSSL 栈把依赖下载到
+`.cargo-home/vendor` 供 cargo 离线解析；增量幂等（已有 `.cargo-checksum.json` 的 crate 跳过）。
+
+```powershell
+python tools/fetch-vendor.py                                          # 根 workspace（core/*）依赖闭包
+python tools/fetch-vendor.py --extra-manifest desktop/src-tauri/Cargo.toml   # 额外独立 workspace 清单，可重复
+python tools/fetch-vendor.py --all-versions toml_datetime             # 拉取该 crate 全部未撤回版本，可重复
+python tools/fetch-vendor.py --selftest                               # 解析器本地自测（零网络，21 项）
+```
+
+`--all-versions` 的用途：贪心选版与精确 pin（`=x.y.z`）冲突时，把候选版本集交给 cargo 自己回溯
+选版（2026-10-12 tauri 2.12.3 的 `toml_datetime =0.6.3` 即此例）。
+
 ## check-contracts.py —— 契约校验
 
 ```powershell
@@ -90,6 +105,9 @@ python tools/package-converter.py --self-test
 5. **本机环境注记**：系统 `%TEMP%` 在本机沙箱下不可写，且 `tempfile.mkdtemp/mkstemp`
    的 0o700/0o600 建目录/文件会产生后续写入被拒的 Windows 权限项——脚本因此不使用
    tempfile，自检暂存于 `tools/.self-test-tmp/`（`TOOLS_SCRATCH` 可覆盖），用后即删。
-   该问题属意外权限拒绝，诊断修复需管理员批准的专用命令，本会话无法执行，未诊断修复。
+   **2026-10-12 诊断完成**：`tools/.self-test-tmp/` 下 4 个残留空目录（mode700/tmp*）的权限条目
+   即 Python 0o700 mkdir 的标准最小形态（仅 CREATOR OWNER / SYSTEM / 管理员），受限令牌下列举
+   必然被拒；专用诊断工具判为「非可修复类」（无缺失权限、无外来软件包条目），未做任何改动，
+   证据存 `.acl-recovery/`。无流程依赖这些残渣；若要清掉需临时开「完全权限」手动删除。
 6. 三个脚本的自检与示例运行已在本机实际执行（见交付报告）；`converters/_template`
    为未签名模板（全零占位），按设计会被拒载/拒绝打包，这是预期行为而非缺陷。
