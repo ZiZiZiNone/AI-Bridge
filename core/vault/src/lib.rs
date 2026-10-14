@@ -6,7 +6,9 @@ mod kdbx;
 mod totp;
 mod xml;
 
-pub use generator::{generate_secret, GeneratedSecret, GeneratorSpec};
+pub use generator::{
+    generate_passphrase, generate_secret, GeneratedSecret, GeneratorSpec, PassphraseSpec,
+};
 pub use totp::{totp_code, TotpAlgorithm, TotpParams};
 
 use std::fmt;
