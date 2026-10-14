@@ -1,0 +1,32 @@
+[package]
+name = "ab-ffi"
+version.workspace = true
+edition.workspace = true
+description = "UniFFI 绑定层：mobile/ffi/aibridge.udl 的机械镜像（接口/记录/错误逐个映射 core 公开 API，零业务规则）"
+
+[lib]
+name = "ab_ffi"
+# cdylib 供移动端静态/动态库链接；rlib 供 Rust 侧测试与下游引用。
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+serde_json.workspace = true
+ab-contract = { path = "../contract" }
+ab-crypto = { path = "../crypto" }
+ab-vault = { path = "../vault" }
+ab-state = { path = "../state" }
+ab-broker = { path = "../broker" }
+ab-audit = { path = "../audit" }
+ab-sync = { path = "../sync" }
+ab-mcp = { path = "../mcp" }
+ab-converter = { path = "../converter-host" }
+
+# UniFFI 稳定线 0.29（0.29.5）：UDL 脚手架（build）+ 绑定生成 CLI（cli）。
+uniffi = { version = "0.29", features = ["build", "cli"] }
+
+[build-dependencies]
+uniffi = { version = "0.29", features = ["build"] }

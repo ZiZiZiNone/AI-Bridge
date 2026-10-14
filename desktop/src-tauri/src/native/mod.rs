@@ -1,22 +1,22 @@
-//! Windows 系统能力封装：core 注入 trait 的实现骨架。
+//! Windows 系统能力封装：core 注入 trait 的 Windows 实现。
 //!
 //! 规则（docs/架构与契约.md §0 / §3）：
 //! - 本层只提供系统原语，**不含任何业务判断**（规则一律在 core）；
 //! - core 的 trait 定义在 core 自身 crate（唯一事实源），本层**不重复声明 trait**；
-//!   每个子模块的文档头写明它要实现哪个 core trait、对应哪些功能点，
-//!   接入方式为 `impl <core trait> for <本层类型>`（core 落地后补 impl 头，方法签名已在骨架固定）；
-//! - 本层不得依赖 `ui`（禁止反向依赖）；错误只带系统错误码，不带业务语义。
+//!   每个子模块的文档头写明它实现哪个 core trait、对应哪些功能点；
+//! - 本层不得依赖 `tauri` 与 `ui`（禁止反向依赖与宿主对象）；错误只带系统错误码，不带业务语义。
 //!
 //! core 注入面（架构与契约 §0）与桌面实现的分工：
 //! | core trait | 桌面实现位置 |
 //! |---|---|
-//! | `VaultStore` | `native::dpapi::DpapiVaultStore` |
-//! | `Entropy` | `native::dpapi::CngEntropy` |
-//! | `Transport` | `bridge::messaging_host`（扩展桥的帧收发原语） |
-//! | `SessionSource` | 由浏览器扩展侧实现（extensions/shared 读 cookie），桌面端经 bridge 接收 |
-//! | `Clock` | 用 `std::time`，无需宿主实现 |
+//! | `ab_vault::VaultStore` | `native::dpapi::DpapiVaultStore`（DPAPI 外壳 + 原子替换） |
+//! | `ab_crypto::Entropy` | `native::dpapi::CngEntropy`（BCryptGenRandom） |
+//! | `ab_sync::Transport` | 局域网直传信道（当前为未实现桩，见 commands::pairing） |
+//! | `ab_state::SessionSource` | 由浏览器扩展侧提供会话，经 bridge 送入（当前空实现） |
+//! | `ab_state::Clock` | 用 `std::time`，无需宿主实现 |
 //!
-//! 未验证：全部子模块为 todo!() 级骨架，未编译、未运行、未调用任何 Windows API。
+//! 验证状态：DPAPI / CNG / 剪贴板 / 注册表实跑单测；Windows Hello（WinRT 往返）与
+//! UIA / SendInput 填表需交互会话，未实测（见 desktop/README.md）。
 
 pub mod clipboard;
 pub mod dpapi;
