@@ -208,6 +208,9 @@ pub struct SessionSummary {
     pub account_ref: String,
     pub target: McpTarget,
     pub scope: McpScope,
+    /// 来源（哪个端 / 转换器 / 扩散事件；A2.3 来源标记）。
+    pub source_type: String,
+    pub source_id: String,
     pub issued_at: String,
     pub expires_at: String,
     pub remaining_ttl_secs: u64,
@@ -246,6 +249,15 @@ fn summary(status: &GrantStatus) -> SessionSummary {
         account_ref: status.account_ref.clone(),
         target: McpTarget::from_contract(&status.target),
         scope: McpScope::from_contract(&status.scope),
+        source_type: match status.source.source_type {
+            ab_contract::SourceType::Extension => "extension",
+            ab_contract::SourceType::Converter => "converter",
+            ab_contract::SourceType::Mobile => "mobile",
+            ab_contract::SourceType::Manual => "manual",
+            ab_contract::SourceType::Sync => "sync",
+        }
+        .to_string(),
+        source_id: status.source.id.clone(),
         issued_at: status.issued_at.clone(),
         expires_at: status.expires_at.clone(),
         remaining_ttl_secs: status.remaining_ttl_secs,
@@ -654,6 +666,8 @@ mod tests {
         assert_eq!(row.session_id, grant.session_id);
         assert_eq!(row.remaining_ttl_secs, 3600);
         assert_eq!(row.state, "active");
+        assert_eq!(row.source_type, "extension", "A2.2 总览必须携带来源");
+        assert_eq!(row.source_id, "chromium");
         let row_json = serde_json::to_string(row).unwrap();
         assert!(!row_json.contains(&grant.handle), "总览不得泄露句柄");
 
