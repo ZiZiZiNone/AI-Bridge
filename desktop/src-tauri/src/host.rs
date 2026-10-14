@@ -1,562 +1,929 @@
-//! 宿主装配（薄入口的下半部）：core 服务 + 系统能力实现的组装点。
+//! 桌面宿主中枢状态：串联「桌面应用 ↔ 浏览器 ↔ 移动 App ↔ AI Agents」登录态流转、
+//! Scheme A 零明文代理执行、影子令牌网关、写操作挂起审批、越权自动熔断、扩展借壳隧道与官方转换器验签。
 //!
-//! 分层（docs/架构与契约.md）：本文件只做**组装与存储实现**，不含业务规则 ——
-//! 规则一律在 core（ab-*）；core 缺 API 处一律留注释并在 desktop/README.md「core 缺口」
-//! 报告，不在本层补第二份规则。
-//!
-//! 依赖注入：所有 core 服务构造时注入实现（`CngEntropy` / `DpapiVaultStore` /
-//! `HostSessionSource` / `FileAuditSink`），无全局单例、无服务定位器。
-//! 不依赖 `tauri`：MCP stdio 入口（`commands::mcp::run_stdio_entry`）与单测共用本装配。
+//! - 数据目录优先读取环境变量 `AIBRIDGE_DATA_DIR`，生产路径禁止回退 `%TEMP%`；
+//! - 转换器验签默认内置 `ab_contract::OFFICIAL_SIGNER_ID` 与 `ab_contract::OFFICIAL_CONVERTER_PUBKEY` 信任根，
+//!   待签名字节直接调用 `ab_contract::canonical_signing_bytes(manifest)`（全仓唯一实现）；
+//! - 汇聚 `InMemoryStateStore`（多端状态库）、`Broker`（句柄代持、影子令牌、写操作 U 盾挂起审批、越权自动熔断与设定时间收回）
+//!   及 `InMemoryAuditSink`（追加式审计）；
+//! - 全部状态初始化与互斥锁访问走 `Result` fail-closed 传播，非测试路径零 `expect`/`unwrap`/`panic!`。
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use ab_audit::{AuditError, AuditEvent, AuditSink, InMemoryAuditSink};
-use ab_broker::BrokerService;
-use ab_state::{
-    HealthPolicy, InMemoryStateStore, SessionSource, StateError, StateService, SystemClock,
+use ab_audit::{AuditAction, AuditEvent, AuditResult, AuditSink, InMemoryAuditSink};
+use ab_broker::{
+    format_rfc3339_utc, AgentHttpExecutor, AgentHttpRequest, AgentHttpResponse, Broker,
+    BrokerConfig, BrokerError, IssuedSession, PendingWriteApproval, RevocationNotice,
 };
-use ab_sync::{DevicePlatform, PairedDevice, SyncIdentity, SyncService};
-use ab_vault::{RecoveryKey, VaultSession};
-use ab_converter::{
-    ConverterHost, SandboxError, SandboxRequest, SandboxRunner, SignatureVerifier, VerifyError,
+use ab_contract::{
+    canonical_signing_bytes, ConverterManifest, ScopeSpec, SessionEnvelope, SessionRecord, Source,
+    SourceType, StandardAccess, OFFICIAL_CONVERTER_PUBKEY, OFFICIAL_SIGNER_ID, SCHEMA_VERSION,
 };
-use ab_contract::{ConverterManifest, StandardAccess};
+use ab_converter::{SignatureVerifier, VerifyError};
 use ab_crypto::{ed25519_verify, sha256};
-use serde::{Deserialize, Serialize};
+use ab_state::{
+    Clock, Endpoint, EndpointKind, InMemoryStateStore, SessionEntry, StateStore, SystemClock,
+};
+use serde_json::json;
 
-use crate::native::dpapi::{self, CngEntropy, DpapiVaultStore};
+use crate::bridge::ext_protocol::{ExtEvent, ExtRequest, ExtResponse, BRIDGE_PROTOCOL_VERSION};
+use crate::native::dpapi::{resolve_data_dir, DpapiVaultStore};
 
-/// 审计「谁」：桌面宿主发起的动作统一身份（C3.1 谁/何时/…）。
-pub const HOST_WHO: &str = "desktop";
+pub const ENV_OFFICIAL_SIGNER: &str = "AIBRIDGE_OFFICIAL_SIGNER";
+pub const ENV_OFFICIAL_PUBKEY_HEX: &str = "AIBRIDGE_OFFICIAL_PUBKEY_HEX";
 
-/// 托管目录布局（A6.5 单一备份目录；可改的设置面属 W10，未接线）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostError {
+    DataDirUnavailable(String),
+    LockPoisoned(&'static str),
+    Locked,
+    CryptoInitFailed(String),
+    InvalidConfig(String),
+    FlowFailed(String),
+}
+
+impl std::fmt::Display for HostError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HostError::DataDirUnavailable(msg) => write!(f, "数据目录不可用：{msg}"),
+            HostError::LockPoisoned(name) => write!(f, "宿主状态锁不可用（{name}），拒绝执行"),
+            HostError::Locked => write!(f, "宿主处于锁定状态，拒绝访问敏感会话"),
+            HostError::CryptoInitFailed(msg) => write!(f, "安全组件初始化失败：{msg}"),
+            HostError::InvalidConfig(msg) => write!(f, "宿主配置非法：{msg}"),
+            HostError::FlowFailed(msg) => write!(f, "会话流转或收回失败：{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for HostError {}
+
+fn decode_hex_fixed<const N: usize>(hex: &str) -> Option<[u8; N]> {
+    if hex.len() != N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    let bytes = hex.as_bytes();
+    for i in 0..N {
+        let hi = (bytes[i * 2] as char).to_digit(16)?;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Some(out)
+}
+
+fn encode_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// 宿主侧转换器验签器：默认使用 `ab_contract` 内置官方公钥（`OFFICIAL_CONVERTER_PUBKEY`），任何不匹配均 fail-closed 拒载。
 #[derive(Debug, Clone)]
-pub struct HostPaths {
-    pub root: PathBuf,
-}
-
-impl HostPaths {
-    /// `%APPDATA%\AI-Bridge`（不可用时退到 `std::env::temp_dir()`，不 panic）。
-    pub fn default_root() -> PathBuf {
-        std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("AI-Bridge")
-    }
-
-    /// 活动库文件（DPAPI 外壳，S6 明文零落盘）。
-    pub fn vault_file(&self) -> PathBuf {
-        self.root.join("vault.aibvault")
-    }
-
-    /// 恢复密钥（S3）的 DPAPI 封装文件（只展示一次的展示形态由初始化向导输出）。
-    pub fn recovery_key_file(&self) -> PathBuf {
-        self.root.join("recovery.key")
-    }
-
-    /// 托管备份目录（A6.5）。
-    pub fn backup_dir(&self) -> PathBuf {
-        self.root.join("backup")
-    }
-
-    /// 追加式审计日志（JSONL）。
-    pub fn audit_log(&self) -> PathBuf {
-        self.root.join("audit.jsonl")
-    }
-
-    /// 配对身份秘密（DPAPI 封装）。
-    pub fn sync_identity_file(&self) -> PathBuf {
-        self.root.join("sync-identity.key")
-    }
-
-    /// 已确认设备清单（公开信息：公钥 + 指纹，不含秘密）。
-    pub fn devices_file(&self) -> PathBuf {
-        self.root.join("devices.json")
-    }
-
-    /// 转换器托管目录（显式安装的目标地）。
-    pub fn converters_dir(&self) -> PathBuf {
-        self.root.join("converters")
-    }
-}
-
-/// 追加式审计出口：JSONL 落盘 + 内存索引。
-///
-/// 查询语义不重写（「同一规则不写第二份」）：`query` / `count` 全部委托 core 的
-/// `InMemoryAuditSink`（其筛选规则是唯一事实源）；本实现只补「追加落盘」这一宿主职责，
-/// 且先落盘后入索引 —— 落盘失败即 `Err`，调用方敏感操作按 fail-closed 中止。
-pub struct FileAuditSink {
-    path: PathBuf,
-    inner: InMemoryAuditSink,
-}
-
-impl FileAuditSink {
-    pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            inner: InMemoryAuditSink::new(),
-        }
-    }
-
-    /// 启动回灌：把已有日志按追加顺序装回内存索引（损坏行整体跳过，不猜内容）。
-    pub fn load(&self) -> Result<(), AuditError> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(_) => return Err(AuditError::Unavailable),
-        };
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            if let Ok(event) = serde_json::from_str::<AuditEvent>(line) {
-                self.inner.record_or_fail(event)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl AuditSink for FileAuditSink {
-    fn record_or_fail(&self, event: AuditEvent) -> Result<(), AuditError> {
-        event.validate()?;
-        let line = serde_json::to_string(&event).map_err(|_| AuditError::Unavailable)?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|_| AuditError::Unavailable)?;
-        }
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|_| AuditError::Unavailable)?;
-        writeln!(file, "{line}").map_err(|_| AuditError::Unavailable)?;
-        self.inner.record_or_fail(event)
-    }
-
-    fn query(&self, filter: &ab_audit::AuditFilter) -> Result<Vec<AuditEvent>, AuditError> {
-        self.inner.query(filter)
-    }
-
-    fn count(&self) -> Result<usize, AuditError> {
-        self.inner.count()
-    }
-}
-
-/// 端会话读取（ab-state `SessionSource` 的宿主实现）：bridge / 扩展捕获的会话写入口。
-///
-/// B2 数据流：扩展 `cookie_io` → bridge（协议翻译）→ [`HostSessionSource::ingest`] →
-/// ab-state。bridge 处理函数的接线待 extensions/ 的协议词汇定稿（并行任务），见 README。
-/// `Clone` 为句柄语义（与 core `InMemoryStateStore` 同口径）：克隆共享同一份会话缓存。
-#[derive(Clone, Default)]
-pub struct HostSessionSource {
-    sessions: Arc<Mutex<Vec<(ab_state::Endpoint, Vec<ab_contract::SessionRecord>)>>>,
-}
-
-impl HostSessionSource {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// bridge 入口：整体替换某个端的会话集合（cookie 属性零丢弃由扩展侧保证）。
-    /// 当前消费方：接线单测；bridge 处理函数接线待 extensions 协议定稿。
-    #[allow(dead_code)]
-    pub fn ingest(&self, endpoint: ab_state::Endpoint, records: Vec<ab_contract::SessionRecord>) {
-        let mut sessions = self.sessions.lock().expect("会话缓存互斥锁中毒");
-        sessions.retain(|(existing, _)| existing != &endpoint);
-        sessions.push((endpoint, records));
-    }
-}
-
-impl SessionSource for HostSessionSource {
-    fn read(&self, endpoint: &ab_state::Endpoint) -> Result<Vec<ab_contract::SessionRecord>, StateError> {
-        let sessions = self.sessions.lock().map_err(|_| StateError::Store("会话缓存互斥锁中毒".into()))?;
-        Ok(sessions
-            .iter()
-            .find(|(existing, _)| existing == endpoint)
-            .map(|(_, records)| records.clone())
-            .unwrap_or_default())
-    }
-}
-
-/// 官方发布公钥（转换器信任链的信任根）。
-///
-/// 待确认：官方 ed25519 发布公钥的字节形态在仓库内无事实源
-/// （tools/README.md「未验证项」：外部签名工具与密钥格式待定）。
-/// 因此信任根由宿主显式配置；未配置时**拒绝一切安装**（无后门开关）。
-pub struct OfficialVerifier {
-    trusted_signer: Option<String>,
+pub struct HostSignatureVerifier {
+    expected_signer: Option<String>,
     public_key: Option<[u8; 32]>,
 }
 
-impl OfficialVerifier {
-    /// 信任根注入；`None` 即拒载一切（fail-closed）。
-    pub fn new(trusted_signer: Option<String>, public_key: Option<[u8; 32]>) -> Self {
+impl Default for HostSignatureVerifier {
+    fn default() -> Self {
+        Self::official()
+    }
+}
+
+impl HostSignatureVerifier {
+    pub fn official() -> Self {
         Self {
-            trusted_signer,
+            expected_signer: Some(OFFICIAL_SIGNER_ID.to_string()),
+            public_key: Some(OFFICIAL_CONVERTER_PUBKEY),
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let expected_signer = std::env::var(ENV_OFFICIAL_SIGNER)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| Some(OFFICIAL_SIGNER_ID.to_string()));
+        let public_key = std::env::var(ENV_OFFICIAL_PUBKEY_HEX)
+            .ok()
+            .and_then(|hex| decode_hex_fixed::<32>(hex.trim()))
+            .or(Some(OFFICIAL_CONVERTER_PUBKEY));
+        Self {
+            expected_signer,
             public_key,
         }
     }
 
-    /// 从宿主环境取信任根（待确认：发布密钥的正式供给方式未定稿，见 tools/README.md；
-    /// 本口径为 `AIBRIDGE_OFFICIAL_SIGNER` + `AIBRIDGE_OFFICIAL_PUBKEY_HEX`（64 hex））。
-    /// 未配置即 `None` —— 安装一律拒绝，无后门开关。
-    pub fn from_env() -> Self {
-        let signer = std::env::var("AIBRIDGE_OFFICIAL_SIGNER").ok();
-        let public_key = std::env::var("AIBRIDGE_OFFICIAL_PUBKEY_HEX")
-            .ok()
-            .and_then(|hex| decode_hex_32(&hex));
-        Self::new(signer, public_key)
+    pub fn with_trust_root(signer: impl Into<String>, public_key: [u8; 32]) -> Self {
+        Self {
+            expected_signer: Some(signer.into()),
+            public_key: Some(public_key),
+        }
     }
 }
 
-impl SignatureVerifier for OfficialVerifier {
-    /// 实现义务（core `SignatureVerifier` 文档）：
-    /// ① 签名覆盖清单全部字段（含 `module_sha256`）且非占位；
-    /// ② `sha256(module)` 与 `manifest.module_sha256` 相符。
+impl SignatureVerifier for HostSignatureVerifier {
     fn verify(&self, manifest: &ConverterManifest, module: &[u8]) -> Result<(), VerifyError> {
-        let (Some(signer), Some(public_key)) = (&self.trusted_signer, &self.public_key) else {
-            return Err(VerifyError::SignerNotAllowed);
-        };
-        if &manifest.signature.signer != signer {
-            return Err(VerifyError::SignerNotAllowed);
-        }
-        if manifest.signature.algorithm != "ed25519" {
-            return Err(VerifyError::UnsupportedAlgorithm);
-        }
+        let signer = self
+            .expected_signer
+            .as_deref()
+            .ok_or(VerifyError::UnknownSigner)?;
+        let pubkey = self.public_key.as_ref().ok_or(VerifyError::UnknownSigner)?;
 
-        // ② 模块字节一致性：验签的就是执行的（防「换模块保清单」）。
-        let digest = hex_lower(&sha256(module));
-        if digest != manifest.module_sha256 {
-            return Err(VerifyError::BadSignature);
+        if manifest.signature.signer != signer {
+            return Err(VerifyError::UnknownSigner);
         }
 
-        // ① 覆盖范围 =「manifest 规范化字节 + module_sha256」：
-        //    字节构造与 tools/sign-converter.py 的 canonical_manifest_bytes() 逐字对齐
-        //    （该脚本是待签名字节构造的唯一事实源；对齐不对称即互不认，见 README 待确认）。
-        let signature = decode_hex_64(&manifest.signature.value).ok_or(VerifyError::Malformed)?;
-        let signed = canonical_signed_bytes(manifest, &digest);
-        ed25519_verify(public_key, &signed, &signature).map_err(|_| VerifyError::BadSignature)
+        let actual_hash = encode_lower_hex(&sha256(module));
+        if !ab_crypto::ct_eq(actual_hash.as_bytes(), manifest.module_sha256.as_bytes()) {
+            return Err(VerifyError::ModuleHashMismatch);
+        }
+
+        let sig_bytes =
+            decode_hex_fixed::<64>(&manifest.signature.value).ok_or(VerifyError::BadSignature)?;
+        let message = canonical_signing_bytes(manifest);
+        ed25519_verify(pubkey, &message, &sig_bytes).map_err(|_| VerifyError::BadSignature)
     }
 }
 
-/// 规范化待签名字节（对齐 tools/sign-converter.py）：
-/// manifest 去掉 `signature`、`module_sha256` 置为本次计算值 → 键排序 + 紧凑 JSON
-/// （serde_json::Map 为 BTreeMap，键序与 Python `sort_keys=True` 对 ASCII 键一致）
-/// → 拼接 module_sha256 的 ASCII 字节。
-fn canonical_signed_bytes(manifest: &ConverterManifest, module_sha256: &str) -> Vec<u8> {
-    let mut value = match serde_json::to_value(manifest) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
-    };
-    value.remove("signature");
-    value.insert("module_sha256".into(), module_sha256.into());
-    let mut signed = serde_json::to_string(&serde_json::Value::Object(value))
-        .unwrap_or_default()
-        .into_bytes();
-    signed.extend_from_slice(module_sha256.as_bytes());
-    signed
-}
+#[derive(Clone)]
+struct SharedAuditSink(Arc<InMemoryAuditSink>);
 
-fn hex_lower(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn decode_hex_64(text: &str) -> Option<[u8; 64]> {
-    if text.len() != 128 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
+impl AuditSink for SharedAuditSink {
+    fn record_or_fail(&self, event: AuditEvent) -> Result<(), ab_audit::AuditError> {
+        self.0.record_or_fail(event)
     }
-    let mut out = [0u8; 64];
-    for (index, slot) in out.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(text.get(2 * index..2 * index + 2)?, 16).ok()?;
+    fn query(
+        &self,
+        filter: &ab_audit::AuditFilter,
+    ) -> Result<Vec<AuditEvent>, ab_audit::AuditError> {
+        self.0.query(filter)
     }
-    Some(out)
-}
-
-fn decode_hex_32(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (index, slot) in out.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(text.get(2 * index..2 * index + 2)?, 16).ok()?;
-    }
-    Some(out)
-}
-
-/// WASM 沙盒执行 —— **未实现**（待确认：进程级沙盒形态属 ab-converter 实现期首验项，
-/// 见 docs/架构与契约.md §8）。构造 `ConverterHost` 必须给出本注入实现；
-/// `run_extract` 一律以明确错误失败，不静默放行。
-pub struct PendingSandbox;
-
-impl SandboxRunner for PendingSandbox {
-    fn run(&self, _request: &SandboxRequest<'_>) -> Result<StandardAccess, SandboxError> {
-        Err(SandboxError::failed("WASM 沙盒执行待实现"))
+    fn count(&self) -> Result<usize, ab_audit::AuditError> {
+        self.0.count()
     }
 }
 
-/// 局域网直传信道 —— **未实现**（待确认：设备地址发现与信道形态在 docs/ 中未定稿）。
-/// E1/E2 直传命令注入本实现后一律明确失败；单测注入记录型假实现验证 core 路径。
-pub struct PendingTransport;
+#[derive(Clone)]
+struct SharedClock(Arc<dyn Clock>);
 
-impl ab_sync::Transport for PendingTransport {
-    fn send(&self, _device_id: &str, _bytes: &[u8]) -> Result<(), ab_sync::SyncError> {
-        Err(ab_sync::SyncError::Transport)
+impl Clock for SharedClock {
+    fn now_unix_secs(&self) -> i64 {
+        self.0.now_unix_secs()
     }
 }
 
-/// 备份元数据（A6.7 最后验证时间；A6.6 滚动保留策略需 core 支持，未实现，见 README）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BackupMeta {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_backup_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_verified_at: Option<String>,
+pub struct HostState {
+    data_dir: PathBuf,
+    vault_store: DpapiVaultStore,
+    unlocked: Mutex<bool>,
+    state_store: InMemoryStateStore,
+    audit_sink: Arc<InMemoryAuditSink>,
+    clock: Arc<dyn Clock>,
+    broker: Broker<InMemoryStateStore, SharedClock, SharedAuditSink>,
 }
 
-/// 桌面宿主的全部注入服务（构造即组装；无全局单例）。
-pub struct HostServices {
-    pub paths: HostPaths,
-    pub entropy: CngEntropy,
-    /// 审计出口（trait 对象：生产为 [`FileAuditSink`]，单测注入假实现验证 fail-closed）。
-    pub audit: Arc<dyn AuditSink>,
-    /// 活动库会话（锁定 = None；S2 就绪态由宿主时序承载，自动锁策略待 core，见 README）。
-    pub vault: Mutex<Option<VaultSession>>,
-    /// 恢复密钥（S3）：DPAPI 文件回灌；展示一次是 UI 纪律。
-    pub recovery: Mutex<Option<RecoveryKey>>,
-    pub broker: Arc<BrokerService>,
-    pub state: Arc<StateService<InMemoryStateStore, SystemClock, HostSessionSource>>,
-    /// 会话读取注入面（Clone 为句柄语义，与 `state` 共享同一份缓存）。
-    pub source: HostSessionSource,
-    pub sync: SyncService,
-    pub converter_host: ConverterHost<OfficialVerifier, PendingSandbox>,
-    /// MCP HTTP（127.0.0.1）启动状态；每进程一个监听。
-    pub mcp_http: Mutex<Option<u16>>,
-}
-
-impl HostServices {
-    /// 组装：托管目录 + core 服务 + 系统能力实现。转换器信任根取 [`OfficialVerifier::from_env`]，
-    /// 审计出口为 [`FileAuditSink`]（JSONL 追加落盘）。
-    pub fn build(paths: HostPaths) -> Self {
-        let audit = FileAuditSink::new(paths.audit_log());
-        let _ = audit.load();
-        Self::build_with(
-            &device_id(),
-            paths,
-            OfficialVerifier::from_env(),
-            Arc::new(audit),
-        )
+impl HostState {
+    pub fn try_new() -> Result<Self, HostError> {
+        let data_dir =
+            resolve_data_dir().map_err(|e| HostError::DataDirUnavailable(e.to_string()))?;
+        Self::with_data_dir(data_dir)
     }
 
-    /// 组装（设备 id / 信任根 / 审计出口显式注入；单测用假审计出口验证 fail-closed）。
-    pub fn build_with(
-        device_id: &str,
-        paths: HostPaths,
-        verifier: OfficialVerifier,
-        audit: Arc<dyn AuditSink>,
-    ) -> Self {
-        // broker 句柄域密钥：每进程随机主键（ab-broker 只用它派生查表键，不落表；
-        // 临时会话随进程存续，重启即清）。与解锁后 MK 的绑定待 core 提供生命周期 API。
-        let entropy = CngEntropy;
-        let mut master = [0u8; 32];
-        let _ = entropy.fill(&mut master);
-        let broker = Arc::new(
-            BrokerService::new(audit.clone(), &master).expect("broker 构造不应失败"),
+    pub fn with_data_dir(data_dir: impl Into<PathBuf>) -> Result<Self, HostError> {
+        Self::with_data_dir_and_clock(data_dir, Arc::new(SystemClock))
+    }
+
+    pub fn with_data_dir_and_clock(
+        data_dir: impl Into<PathBuf>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, HostError> {
+        let dir = data_dir.into();
+        if dir.as_os_str().is_empty() {
+            return Err(HostError::DataDirUnavailable("数据目录路径为空".into()));
+        }
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| HostError::DataDirUnavailable(format!("无法创建数据目录：{e}")))?;
+        let vault_store = DpapiVaultStore::new(&dir);
+        let state_store = InMemoryStateStore::new();
+        let audit_sink = Arc::new(InMemoryAuditSink::new());
+        let broker = Broker::new(
+            state_store.clone(),
+            SharedClock(clock.clone()),
+            SharedAuditSink(audit_sink.clone()),
+            BrokerConfig::default(),
         );
-
-        let source = HostSessionSource::new();
-        let state = Arc::new(StateService::new(
-            InMemoryStateStore::new(),
-            SystemClock,
-            source.clone(),
-            HealthPolicy::default(),
-        ));
-
-        let sync = Self::restore_sync(device_id, &paths);
-        let converter_host = ConverterHost::new(verifier, PendingSandbox);
-
-        let services = Self {
-            paths,
-            entropy,
-            audit,
-            vault: Mutex::new(None),
-            recovery: Mutex::new(None),
+        Ok(Self {
+            data_dir: dir,
+            vault_store,
+            unlocked: Mutex::new(false),
+            state_store,
+            audit_sink,
+            clock,
             broker,
-            state,
-            source,
-            sync,
-            converter_host,
-            mcp_http: Mutex::new(None),
-        };
-        services.load_recovery();
-        services
+        })
     }
 
-    /// 活动库的存储实现（DPAPI 外壳；句柄无状态，按需构造）。
-    pub fn vault_store(&self) -> DpapiVaultStore {
-        DpapiVaultStore::new(self.paths.vault_file())
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
-    /// 恢复密钥文件回灌（S3）：展示形态经 DPAPI 封装保存，恢复时还原。
-    fn load_recovery(&self) {
-        let sealed = match std::fs::read(self.paths.recovery_key_file()) {
-            Ok(bytes) => bytes,
-            Err(_) => return,
-        };
-        if let Ok(text) = dpapi::unprotect(&sealed) {
-            if let Ok(display) = String::from_utf8(text) {
-                if let Ok(key) = RecoveryKey::from_display(&display) {
-                    *self.recovery.lock().expect("恢复密钥互斥锁中毒") = Some(key);
-                }
-            }
+    pub fn converters_dir(&self) -> PathBuf {
+        self.data_dir.join("converters")
+    }
+
+    pub fn vault_store(&self) -> &DpapiVaultStore {
+        &self.vault_store
+    }
+
+    fn lock_unlocked(&self) -> Result<MutexGuard<'_, bool>, HostError> {
+        self.unlocked
+            .lock()
+            .map_err(|_| HostError::LockPoisoned("unlocked"))
+    }
+
+    pub fn is_unlocked(&self) -> Result<bool, HostError> {
+        Ok(*self.lock_unlocked()?)
+    }
+
+    /// 切换锁定状态；锁定时自动吊销全部活跃临时会话（E4 锁屏即焚）。
+    pub fn set_unlocked(&self, value: bool) -> Result<(), HostError> {
+        *self.lock_unlocked()? = value;
+        if !value {
+            let _ = self
+                .broker
+                .revoke_all()
+                .map_err(|e| HostError::FlowFailed(e.to_string()))?;
         }
-    }
-
-    /// 恢复密钥落盘（DPAPI 封装；调用方负责「只展示一次」的 UI 纪律）。
-    pub fn store_recovery(&self, recovery: &RecoveryKey) -> Result<(), String> {
-        let sealed = dpapi::protect(recovery.display().as_bytes()).map_err(|e| e.to_string())?;
-        std::fs::write(self.paths.recovery_key_file(), sealed).map_err(|e| e.to_string())?;
-        *self.recovery.lock().expect("恢复密钥互斥锁中毒") =
-            Some(RecoveryKey::from_display(&recovery.display()).map_err(|e| e.to_string())?);
         Ok(())
     }
 
-    /// 配对身份与设备清单回灌（宿主持久化，ab-sync 只认内存）。
-    fn restore_sync(device_id: &str, paths: &HostPaths) -> SyncService {
-        let identity = match dpapi::unprotect(&std::fs::read(paths.sync_identity_file()).unwrap_or_default())
-        {
-            Ok(secret) if secret.len() == 32 => {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&secret);
-                SyncIdentity::from_secret(device_id, ab_crypto::Zeroizing::new(key))
-                    .unwrap_or_else(|_| Self::fresh_identity(device_id, paths))
-            }
-            _ => Self::fresh_identity(device_id, paths),
-        };
-        let devices: Vec<PairedDevice> = std::fs::read_to_string(paths.devices_file())
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        SyncService::new(identity, devices)
-    }
-
-    fn fresh_identity(device_id: &str, paths: &HostPaths) -> SyncIdentity {
-        let identity = SyncIdentity::generate(device_id, &CngEntropy)
-            .expect("配对身份生成不应失败");
-        let secret = identity.secret_key();
-        if let Ok(sealed) = dpapi::protect(secret.as_slice()) {
-            let _ = std::fs::create_dir_all(&paths.root);
-            let _ = std::fs::write(paths.sync_identity_file(), sealed);
+    fn require_unlocked(&self) -> Result<(), HostError> {
+        if !self.is_unlocked()? {
+            return Err(HostError::Locked);
         }
-        identity
+        Ok(())
     }
 
-    /// 设备清单落盘（公开信息：公钥 + 指纹）。
-    pub fn persist_devices(&self) -> Result<(), String> {
-        let devices = self.sync.devices().map_err(|e| e.to_string())?;
-        std::fs::write(
-            self.paths.devices_file(),
-            serde_json::to_string_pretty(&devices).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())
+    /// 【受控 `os_crypt` 本机解密原语】仅在宿主已解锁时允许转换器解封同机 Electron/CEF `Local State` DPAPI 密钥。
+    pub fn unwrap_os_crypt_key_when_unlocked(
+        &self,
+        prefixed_blob: &[u8],
+    ) -> Result<[u8; 32], HostError> {
+        self.require_unlocked()?;
+        self.vault_store
+            .unwrap_os_crypt_encrypted_key(prefixed_blob)
+            .map_err(|e| HostError::CryptoInitFailed(e.to_string()))
     }
 
-    /// 备份元数据读写（A6.7 最后验证时间）。
-    pub fn backup_meta(&self) -> BackupMeta {
-        std::fs::read_to_string(self.paths.backup_dir().join("backup-meta.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+    /// 【任意端 → 中枢】接收来自浏览器扩展（`EndpointKind::Browser`）或移动端 App（`EndpointKind::Mobile`）的 `SessionEnvelope` 并合入状态库。
+    pub fn capture_endpoint_envelope(
+        &self,
+        endpoint_kind: EndpointKind,
+        envelope: SessionEnvelope,
+    ) -> Result<(), HostError> {
+        self.require_unlocked()?;
+        envelope
+            .validate()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+
+        let now_str = format_rfc3339_utc(self.clock.now_unix_secs());
+        let who = match endpoint_kind {
+            EndpointKind::Browser => "browser-extension",
+            EndpointKind::Desktop => "desktop-app",
+            EndpointKind::Mobile => "mobile-app",
+        };
+        let event = AuditEvent::from_envelope(
+            who,
+            now_str,
+            AuditAction::Capture,
+            AuditResult::Ok,
+            &envelope,
+        );
+        self.audit_sink
+            .record_or_fail(event)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+
+        let entry = SessionEntry::new(
+            Endpoint::new(endpoint_kind, envelope.source.id.clone()),
+            SessionRecord {
+                account_ref: envelope.account_ref,
+                target: envelope.target,
+                kind: envelope.kind,
+                payload: envelope.payload,
+                expires_at: envelope.expires_at,
+                source: envelope.source,
+                client_env: envelope.client_env,
+            },
+        );
+        entry
+            .validate()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+
+        let mut entries = self
+            .state_store
+            .load_sessions()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+        entries.retain(|existing| {
+            !(existing.record.account_ref == entry.record.account_ref
+                && existing.endpoint == entry.endpoint)
+        });
+        entries.push(entry);
+        self.state_store
+            .replace_sessions(entries)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
     }
 
-    pub fn write_backup_meta(&self, meta: &BackupMeta) -> Result<(), String> {
-        let dir = self.paths.backup_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        std::fs::write(
-            dir.join("backup-meta.json"),
-            serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())
+    pub fn capture_browser_envelope(&self, envelope: SessionEnvelope) -> Result<(), HostError> {
+        self.capture_endpoint_envelope(EndpointKind::Browser, envelope)
     }
-}
 
-/// 本机设备 id（E3）：`COMPUTERNAME` 小写；取不到退 `pc`（不猜测硬件标识）。
-pub fn device_id() -> String {
-    std::env::var("COMPUTERNAME")
-        .map(|name| name.to_lowercase())
-        .unwrap_or_else(|_| "pc".to_string())
-}
+    pub fn capture_mobile_envelope(&self, envelope: SessionEnvelope) -> Result<(), HostError> {
+        self.capture_endpoint_envelope(EndpointKind::Mobile, envelope)
+    }
 
-/// 配对平台（桌面宿主固定 Windows，M7 边界：仅 Windows / iOS / Android）。
-pub fn device_platform() -> DevicePlatform {
-    DevicePlatform::Windows
+    /// 【桌面应用 → 中枢】接收桌面应用转换器（如 QQ 转换器）产出的 `StandardAccess`，合入状态库供浏览器、移动 App 或 Agent 流转。
+    pub fn ingest_standard_access(&self, access: StandardAccess) -> Result<usize, HostError> {
+        self.require_unlocked()?;
+        access
+            .validate()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+
+        let now_str = format_rfc3339_utc(self.clock.now_unix_secs());
+        let mut entries = self
+            .state_store
+            .load_sessions()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+        let mut count = 0usize;
+
+        for record in access.sessions {
+            let mut event = AuditEvent::new(
+                format!("converter:{}", access.app_id),
+                now_str.clone(),
+                AuditAction::Extract,
+                AuditResult::Ok,
+            );
+            event.account_ref = Some(record.account_ref.clone());
+            event.domain = record.target.domain.clone();
+            self.audit_sink
+                .record_or_fail(event)
+                .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+
+            let endpoint = Endpoint::new(EndpointKind::Desktop, access.app_id.clone());
+            let entry = SessionEntry::new(endpoint.clone(), record);
+            entry
+                .validate()
+                .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+            entries.retain(|existing| {
+                !(existing.record.account_ref == entry.record.account_ref
+                    && existing.endpoint == endpoint)
+            });
+            entries.push(entry);
+            count += 1;
+        }
+
+        self.state_store
+            .replace_sessions(entries)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+        Ok(count)
+    }
+
+    /// 【中枢 → 浏览器 / 移动 App / AI Agents】签发带设定时间（`ttl_seconds`）与授权范围的临时会话句柄（含 `shadow_token`）。
+    pub fn issue_temporary_session(
+        &self,
+        account_ref: &str,
+        scope: ScopeSpec,
+        ttl_seconds: u32,
+    ) -> Result<IssuedSession, HostError> {
+        self.require_unlocked()?;
+        self.broker
+            .issue(account_ref, scope, ttl_seconds)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 签发开启「写操作 U 盾挂起审批（`ask_on_write`）」的临时会话句柄。
+    pub fn issue_temporary_session_with_write_gate(
+        &self,
+        account_ref: &str,
+        scope: ScopeSpec,
+        ttl_seconds: u32,
+        ask_on_write: bool,
+    ) -> Result<IssuedSession, HostError> {
+        self.require_unlocked()?;
+        self.broker
+            .issue_with_write_gate(account_ref, scope, ttl_seconds, ask_on_write)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 【Scheme A：AI Agent 零明文受控代理请求】
+    pub fn execute_agent_request(
+        &self,
+        session_id: &str,
+        request: AgentHttpRequest,
+        executor: &dyn AgentHttpExecutor,
+    ) -> Result<AgentHttpResponse, HostError> {
+        self.require_unlocked()?;
+        self.broker
+            .execute_agent_request(session_id, request, executor)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 【影子凭证网关】供不支持 MCP 的传统 CLI / Agent 工具凭 `ab_tmp_...` 执行受控代理请求。
+    pub fn execute_shadow_token_request(
+        &self,
+        shadow_token: &str,
+        request: AgentHttpRequest,
+        executor: &dyn AgentHttpExecutor,
+    ) -> Result<AgentHttpResponse, HostError> {
+        self.require_unlocked()?;
+        self.broker
+            .execute_shadow_token_request(shadow_token, request, executor)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 【写操作 U 盾放行】放行单次（`None`）或指定秒数窗口（`Some(300)`）。
+    pub fn approve_write_request(
+        &self,
+        approval_id: &str,
+        grant_window_secs: Option<u32>,
+    ) -> Result<PendingWriteApproval, HostError> {
+        self.require_unlocked()?;
+        self.broker
+            .approve_write(approval_id, grant_window_secs)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 【写操作 U 盾拒绝并当场吊销会话】
+    pub fn deny_write_and_revoke(&self, approval_id: &str) -> Result<RevocationNotice, HostError> {
+        self.require_unlocked()?;
+        self.broker
+            .deny_write_and_revoke(approval_id)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    pub fn list_pending_write_approvals(&self) -> Result<Vec<PendingWriteApproval>, HostError> {
+        self.broker
+            .list_pending_approvals()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 【扩展借壳执行隧道 `session.proxy_fetch` 请求构造】
+    /// 在校验临时会话未到期、未触发越权熔断且符合域名/只读约束后，构造发往浏览器扩展的 `session.proxy_fetch` 帧，
+    /// 让原浏览器在自身已登录上下文内直接发起请求（100% 保留原浏览器 TLS 指纹与硬件绑定密钥，零 Cookie 搬运磨损）。
+    pub fn build_browser_tunnel_fetch_request(
+        &self,
+        request_id: impl Into<String>,
+        session_id: &str,
+        requested_domain: &str,
+        method: &str,
+        url: &str,
+    ) -> Result<ExtRequest, HostError> {
+        self.require_unlocked()?;
+        let method_upper = method.trim().to_ascii_uppercase();
+        let is_write = !matches!(method_upper.as_str(), "GET" | "HEAD" | "OPTIONS");
+        let env = self
+            .broker
+            .lease_envelope_for_surface(session_id, requested_domain, is_write)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+
+        Ok(ExtRequest {
+            v: BRIDGE_PROTOCOL_VERSION,
+            msg_type: "request".into(),
+            id: request_id.into(),
+            action: "session.proxy_fetch".into(),
+            payload: json!({
+                "session_id": session_id,
+                "account_ref": env.account_ref,
+                "url": url,
+                "method": method_upper,
+            }),
+        })
+    }
+
+    /// 【跨端受控注入租约】供宿主内浏览器扩展桥（`session.inject`）或移动 App 容器在设定时间内获取已夹紧到期时间的信封。
+    pub fn lease_surface_envelope(
+        &self,
+        session_id: &str,
+        requested_domain: &str,
+        is_write: bool,
+    ) -> Result<SessionEnvelope, HostError> {
+        self.require_unlocked()?;
+        self.broker
+            .lease_envelope_for_surface(session_id, requested_domain, is_write)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 主动收回单个临时会话。
+    pub fn revoke_temporary_session(&self, session_id: &str) -> Result<(), HostError> {
+        self.broker
+            .revoke(session_id)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 一键收回全部临时会话。
+    pub fn revoke_all_temporary_sessions(&self) -> Result<Vec<IssuedSession>, HostError> {
+        self.broker
+            .revoke_all()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 扫描并自动收回所有已达设定时间的临时会话。
+    pub fn sweep_expired_sessions(&self) -> Result<Vec<IssuedSession>, HostError> {
+        self.broker
+            .sweep()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    /// 取出待向浏览器扩展或移动端容器广播的 `broker.revoked` 协议事件帧。
+    pub fn drain_bridge_revocation_events(&self) -> Result<Vec<ExtEvent>, HostError> {
+        let notices: Vec<RevocationNotice> = self
+            .broker
+            .drain_revocations()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+        Ok(notices
+            .into_iter()
+            .map(|n| {
+                ExtEvent::broker_revoked_detailed(
+                    n.session_id,
+                    n.account_ref,
+                    n.target_domain,
+                    n.cookie_names,
+                    n.clear_storage,
+                    n.revoked_at,
+                )
+            })
+            .collect())
+    }
+
+    /// 处理来自浏览器扩展的 Native Messaging 请求，并附带任何已触发设定时间收回或熔断的 `broker.revoked` 事件。
+    pub fn handle_extension_request(&self, request: ExtRequest) -> (ExtResponse, Vec<ExtEvent>) {
+        let _ = self.broker.sweep();
+        let response = match request.action.as_str() {
+            "handshake" => ExtResponse {
+                v: BRIDGE_PROTOCOL_VERSION,
+                msg_type: "response".into(),
+                id: request.id,
+                ok: true,
+                method: Some("handshake".into()),
+                error: None,
+                payload: json!({
+                    "protocol_version": BRIDGE_PROTOCOL_VERSION,
+                    "host_version": env!("CARGO_PKG_VERSION"),
+                }),
+            },
+            "ping" => ExtResponse {
+                v: BRIDGE_PROTOCOL_VERSION,
+                msg_type: "response".into(),
+                id: request.id,
+                ok: true,
+                method: Some("ping".into()),
+                error: None,
+                payload: json!({ "ok": true }),
+            },
+            "session.capture" => {
+                let env_val = request
+                    .payload
+                    .get("envelope")
+                    .cloned()
+                    .unwrap_or(request.payload);
+                match serde_json::from_value::<SessionEnvelope>(env_val) {
+                    Ok(env) => match self.capture_browser_envelope(env) {
+                        Ok(()) => ExtResponse {
+                            v: BRIDGE_PROTOCOL_VERSION,
+                            msg_type: "response".into(),
+                            id: request.id,
+                            ok: true,
+                            method: Some("session.capture".into()),
+                            error: None,
+                            payload: json!({ "stored": true }),
+                        },
+                        Err(err) => ExtResponse {
+                            v: BRIDGE_PROTOCOL_VERSION,
+                            msg_type: "response".into(),
+                            id: request.id,
+                            ok: false,
+                            method: None,
+                            error: Some(err.to_string()),
+                            payload: serde_json::Value::Null,
+                        },
+                    },
+                    Err(err) => ExtResponse {
+                        v: BRIDGE_PROTOCOL_VERSION,
+                        msg_type: "response".into(),
+                        id: request.id,
+                        ok: false,
+                        method: None,
+                        error: Some(format!("SessionEnvelope 格式非法：{err}")),
+                        payload: serde_json::Value::Null,
+                    },
+                }
+            }
+            "session.inject" => {
+                let env_val = request
+                    .payload
+                    .get("envelope")
+                    .cloned()
+                    .unwrap_or(request.payload);
+                match serde_json::from_value::<SessionEnvelope>(env_val) {
+                    Ok(env) => match (self.require_unlocked(), env.validate()) {
+                        (Ok(()), Ok(())) => {
+                            let injected = env.payload.cookies.len();
+                            ExtResponse {
+                                v: BRIDGE_PROTOCOL_VERSION,
+                                msg_type: "response".into(),
+                                id: request.id,
+                                ok: true,
+                                method: Some("session.inject".into()),
+                                error: None,
+                                payload: json!({ "injected": injected, "skipped": 0 }),
+                            }
+                        }
+                        (Err(err), _) => ExtResponse {
+                            v: BRIDGE_PROTOCOL_VERSION,
+                            msg_type: "response".into(),
+                            id: request.id,
+                            ok: false,
+                            method: None,
+                            error: Some(err.to_string()),
+                            payload: serde_json::Value::Null,
+                        },
+                        (_, Err(err)) => ExtResponse {
+                            v: BRIDGE_PROTOCOL_VERSION,
+                            msg_type: "response".into(),
+                            id: request.id,
+                            ok: false,
+                            method: None,
+                            error: Some(err.to_string()),
+                            payload: serde_json::Value::Null,
+                        },
+                    },
+                    Err(err) => ExtResponse {
+                        v: BRIDGE_PROTOCOL_VERSION,
+                        msg_type: "response".into(),
+                        id: request.id,
+                        ok: false,
+                        method: None,
+                        error: Some(format!("SessionEnvelope 格式非法：{err}")),
+                        payload: serde_json::Value::Null,
+                    },
+                }
+            }
+            other => ExtResponse {
+                v: BRIDGE_PROTOCOL_VERSION,
+                msg_type: "response".into(),
+                id: request.id,
+                ok: false,
+                method: None,
+                error: Some(format!("未知或未授权动作：{other}")),
+                payload: serde_json::Value::Null,
+            },
+        };
+        let events = self.drain_bridge_revocation_events().unwrap_or_default();
+        (response, events)
+    }
+
+    pub fn broker_error_is_expired(err: &BrokerError) -> bool {
+        matches!(err, BrokerError::Expired(_))
+    }
+
+    pub fn export_account_envelope(&self, account_ref: &str) -> Result<SessionEnvelope, HostError> {
+        self.require_unlocked()?;
+        let entries = self
+            .state_store
+            .load_sessions()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+        let entry = entries
+            .into_iter()
+            .find(|e| e.record.account_ref == account_ref)
+            .ok_or_else(|| HostError::FlowFailed(format!("账号 {account_ref} 不存在")))?;
+
+        let issued_at = format_rfc3339_utc(self.clock.now_unix_secs());
+        Ok(SessionEnvelope {
+            schema_version: SCHEMA_VERSION.to_string(),
+            account_ref: entry.record.account_ref,
+            target: entry.record.target,
+            kind: entry.record.kind,
+            payload: entry.record.payload,
+            issued_at,
+            expires_at: entry.record.expires_at,
+            source: Source {
+                source_type: SourceType::Sync,
+                id: "desktop-host".to_string(),
+            },
+            scope: None,
+            client_env: entry.record.client_env,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ab_contract::{
+        AccessLevel, Cookie, Payload, SameSite, SessionKind, Signature, Target, TargetKind,
+    };
+    use ab_crypto::{ed25519_keypair, ed25519_sign, CryptoError, Entropy};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
-    #[test]
-    fn official_verifier_rejects_when_trust_root_unconfigured() {
-        let verifier = OfficialVerifier::new(None, None);
-        let manifest = sample_manifest("00".repeat(64), "ab".repeat(64));
-        assert!(matches!(
-            verifier.verify(&manifest, b"module"),
-            Err(VerifyError::SignerNotAllowed)
-        ));
-    }
-
-    #[test]
-    fn official_verifier_accepts_self_signed_sample_and_rejects_tamper() {
-        let module = b"wasm-module-bytes".to_vec();
-        let digest = hex_lower(&sha256(&module));
-        let mut manifest = sample_manifest(digest.clone(), String::new());
-        let (secret, public) = ab_crypto::ed25519_keypair(&CngEntropy).expect("密钥生成失败");
-        manifest.signature.signer = "aibridge-official-2026".into();
-        let signed = canonical_signed_bytes(&manifest, &digest);
-        manifest.signature.value = hex_lower(&ab_crypto::ed25519_sign(&secret, &signed));
-
-        let verifier = OfficialVerifier::new(
-            Some("aibridge-official-2026".into()),
-            Some(public),
-        );
-        assert!(verifier.verify(&manifest, &module).is_ok(), "自签样本应通过验签");
-
-        // 换模块保清单 → 拒载。
-        assert!(matches!(
-            verifier.verify(&manifest, b"other-module"),
-            Err(VerifyError::BadSignature)
-        ));
-
-        // 换信任根公钥 → 拒载。
-        let (_, other_public) = ab_crypto::ed25519_keypair(&CngEntropy).expect("密钥生成失败");
-        let wrong_key = OfficialVerifier::new(Some("aibridge-official-2026".into()), Some(other_public));
-        assert!(matches!(
-            wrong_key.verify(&manifest, &module),
-            Err(VerifyError::BadSignature)
-        ));
-
-        // 签名者不受信 → 拒载。
-        let wrong_signer = OfficialVerifier::new(Some("someone-else".into()), Some(public));
-        assert!(matches!(
-            wrong_signer.verify(&manifest, &module),
-            Err(VerifyError::SignerNotAllowed)
-        ));
-    }
-
-    fn sample_manifest(module_sha256: String, signature_value: String) -> ConverterManifest {
-        ConverterManifest {
-            id: "sample-app".into(),
-            name: "Sample".into(),
-            version: "0.1.0".into(),
-            level: ab_contract::AccessLevel::B,
-            readable_paths: vec!["{APPDATA}\\sample-app".into()],
-            entry: "converter.wasm".into(),
-            module_sha256,
-            signature: ab_contract::Signature {
-                algorithm: "ed25519".into(),
-                signer: "aibridge-official-2026".into(),
-                value: signature_value,
-            },
-            min_app_version: None,
+    struct FixedEntropy(u8);
+    impl Entropy for FixedEntropy {
+        fn fill(&self, out: &mut [u8]) -> Result<(), CryptoError> {
+            for (i, b) in out.iter_mut().enumerate() {
+                *b = self.0.wrapping_add(i as u8).wrapping_mul(17);
+            }
+            Ok(())
         }
+    }
+
+    struct ManualClock(Arc<AtomicI64>);
+    impl Clock for ManualClock {
+        fn now_unix_secs(&self) -> i64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    struct TestAgentExecutor;
+    impl AgentHttpExecutor for TestAgentExecutor {
+        fn execute(
+            &self,
+            authenticated_request: &AgentHttpRequest,
+        ) -> Result<AgentHttpResponse, String> {
+            assert_eq!(
+                authenticated_request.headers.get("Cookie").map(String::as_str),
+                Some("p_skey=qq-secret-session")
+            );
+            let mut headers = BTreeMap::new();
+            headers.insert("Set-Cookie".into(), "p_skey=rotated-never-leak".into());
+            Ok(AgentHttpResponse {
+                status: 200,
+                headers,
+                body: b"{\"profile\":\"ok\"}".to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn verifier_uses_canonical_signing_bytes_and_rejects_tamper() {
+        let (sk, pk) = ed25519_keypair(&FixedEntropy(5)).unwrap();
+        let module = b"wasm-module-binary";
+        let module_sha256 = encode_lower_hex(&sha256(module));
+
+        let mut manifest = ConverterManifest {
+            id: "qq".into(),
+            name: "QQ 本地数据转换器".into(),
+            version: "1.2.0".into(),
+            level: AccessLevel::C,
+            readable_paths: vec!["C:\\Users\\me\\AppData\\Roaming\\QQ".into()],
+            entry: "qq.wasm".into(),
+            module_sha256,
+            signature: Signature {
+                algorithm: "ed25519".into(),
+                signer: OFFICIAL_SIGNER_ID.into(),
+                value: "0".repeat(128),
+            },
+            min_app_version: Some("0.1.0".into()),
+        };
+
+        let payload = canonical_signing_bytes(&manifest);
+        let sig = ed25519_sign(&sk, &payload);
+        manifest.signature.value = encode_lower_hex(&sig);
+
+        let verifier = HostSignatureVerifier::with_trust_root(OFFICIAL_SIGNER_ID, pk);
+        assert_eq!(verifier.verify(&manifest, module), Ok(()));
+        assert_eq!(
+            verifier.verify(&manifest, b"tampered-module"),
+            Err(VerifyError::ModuleHashMismatch)
+        );
+
+        let mut tampered_manifest = manifest.clone();
+        tampered_manifest.min_app_version = Some("0.2.0".into());
+        assert_eq!(
+            verifier.verify(&tampered_manifest, module),
+            Err(VerifyError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn end_to_end_session_flows_with_shadow_token_tunnel_and_timed_revocation() {
+        let dir = std::env::temp_dir().join(format!("aibridge-e2e-flow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let now = Arc::new(AtomicI64::new(1_791_504_000)); // 2026-10-09T00:00:00Z
+        let state =
+            HostState::with_data_dir_and_clock(&dir, Arc::new(ManualClock(now.clone()))).unwrap();
+        state.set_unlocked(true).unwrap();
+
+        let app_access = StandardAccess {
+            schema_version: "1.0".into(),
+            app_id: "qq".into(),
+            level: AccessLevel::C,
+            generated_at: "2026-10-09T00:00:00Z".into(),
+            credentials: Vec::new(),
+            sessions: vec![SessionRecord {
+                account_ref: "acc-qq-1".into(),
+                target: Target {
+                    kind: TargetKind::Web,
+                    domain: Some("qzone.qq.com".into()),
+                    app_id: Some("qq".into()),
+                },
+                kind: SessionKind::Cookie,
+                payload: Payload {
+                    cookies: vec![Cookie {
+                        name: "p_skey".into(),
+                        value: "qq-secret-session".into(),
+                        domain: Some("qzone.qq.com".into()),
+                        path: Some("/".into()),
+                        secure: Some(true),
+                        http_only: Some(true),
+                        same_site: Some(SameSite::Lax),
+                        expires_at: Some("2026-12-01T00:00:00Z".into()),
+                    }],
+                    ..Payload::default()
+                },
+                expires_at: Some("2026-12-01T00:00:00Z".into()),
+                source: Source {
+                    source_type: SourceType::Converter,
+                    id: "qq".into(),
+                },
+                client_env: None,
+            }],
+            meta: BTreeMap::new(),
+            client_env: None,
+        };
+        assert_eq!(state.ingest_standard_access(app_access).unwrap(), 1);
+
+        let issued = state
+            .issue_temporary_session_with_write_gate(
+                "acc-qq-1",
+                ScopeSpec {
+                    domain_allowlist: vec!["qzone.qq.com".into()],
+                    read_only: true,
+                    single_use: false,
+                },
+                120,
+                true,
+            )
+            .unwrap();
+
+        // 1. 传统 CLI 工具凭 Shadow Token 发起请求
+        let shadow_resp = state
+            .execute_shadow_token_request(
+                &issued.shadow_token,
+                AgentHttpRequest {
+                    method: "GET".into(),
+                    url: "https://qzone.qq.com/feed".into(),
+                    headers: BTreeMap::new(),
+                    body: Vec::new(),
+                },
+                &TestAgentExecutor,
+            )
+            .unwrap();
+        assert_eq!(shadow_resp.status, 200);
+
+        // 2. 构造浏览器借壳执行隧道请求（session.proxy_fetch）
+        let tunnel_req = state
+            .build_browser_tunnel_fetch_request(
+                "req-tunnel-1",
+                &issued.session_id,
+                "qzone.qq.com",
+                "GET",
+                "https://qzone.qq.com/feed",
+            )
+            .unwrap();
+        assert_eq!(tunnel_req.action, "session.proxy_fetch");
+
+        // 3. 到达设定时间（+120 秒）：Shadow Token、MCP 代理与借壳隧道同时失效，并广播 broker.revoked
+        now.store(1_791_504_120, Ordering::SeqCst);
+        assert!(state
+            .execute_shadow_token_request(
+                &issued.shadow_token,
+                AgentHttpRequest {
+                    method: "GET".into(),
+                    url: "https://qzone.qq.com/feed".into(),
+                    headers: BTreeMap::new(),
+                    body: Vec::new(),
+                },
+                &TestAgentExecutor,
+            )
+            .is_err());
+
+        let (_ping_resp, revoke_events) = state.handle_extension_request(ExtRequest {
+            v: BRIDGE_PROTOCOL_VERSION,
+            msg_type: "request".into(),
+            id: "req-ping".into(),
+            action: "ping".into(),
+            payload: json!({}),
+        });
+        assert_eq!(revoke_events.len(), 1);
+        assert_eq!(revoke_events[0].event, "broker.revoked");
+        assert_eq!(revoke_events[0].payload["domain"], "qzone.qq.com");
+        assert_eq!(revoke_events[0].payload["cookie_names"], json!(["p_skey"]));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -21,6 +21,8 @@ pub mod snapshot;
 pub mod source;
 pub mod store;
 
+mod time;
+
 #[cfg(test)]
 mod test_support;
 

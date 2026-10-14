@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- AI-Bridge · Android 清单（源码文件；build.gradle.kts / 工程文件按 mobile/README.md 指引生成，不手写）。
-     显示名一律 AI-Bridge（app_name）。本地优先：不声明遥测 / 云同步相关能力。 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 仅用于同局域网 NSD 发现与点对点直传（E3），不访问公网或云服务 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:allowBackup="false"
@@ -19,7 +21,6 @@
             </intent-filter>
         </activity>
 
-        <!-- M9 / M-F3：系统自动填充（b 级填表；仅账号类条目） -->
         <service
             android:name=".autofill.AIBridgeAutofillService"
             android:exported="true"
@@ -33,8 +34,6 @@
                 android:resource="@xml/autofill_service" />
         </service>
 
-        <!-- M9 / M-F3：凭据提供方（passkey / 密码；不含支付信息与身份分类）。
-             注意：androidx.credentials 要求的 res/xml 能力声明随 Android 工程生成时按所引版本补齐。 -->
         <service
             android:name=".credential.AIBridgeCredentialProviderService"
             android:exported="true"

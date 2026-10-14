@@ -65,7 +65,7 @@ impl SessionEntry {
         }
         self.record.validate()?;
         if let Some(expires_at) = &self.record.expires_at {
-            if ab_contract::time::parse_rfc3339_secs(expires_at).is_none() {
+            if crate::time::parse_rfc3339_secs(expires_at).is_none() {
                 return Err(StateError::InvalidEntry {
                     field: "expires_at",
                     value: expires_at.clone(),
@@ -79,7 +79,7 @@ impl SessionEntry {
     pub fn expires_at_secs(&self) -> Result<Option<i64>, StateError> {
         match &self.record.expires_at {
             None => Ok(None),
-            Some(expires_at) => match ab_contract::time::parse_rfc3339_secs(expires_at) {
+            Some(expires_at) => match crate::time::parse_rfc3339_secs(expires_at) {
                 Some(secs) => Ok(Some(secs)),
                 None => Err(StateError::InvalidEntry {
                     field: "expires_at",

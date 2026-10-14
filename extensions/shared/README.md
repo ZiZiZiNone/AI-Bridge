@@ -1,12 +1,7 @@
 # extensions/shared —— 扩展共享层（TypeScript，宿主无关）
 
 浏览器扩展侧与桌面桥之间共享的一份实现：**契约类型镜像 + cookie 映射 + SessionEnvelope 编解码 +
-native messaging 桥协议 v1 + cookie 读写封装 + 桥收发/调度 + 协议装配**。零 UI、零宿主依赖，
-同一份代码可在扩展、单测、任意宿主里直接工作。
-
-> **bridge 协议待与 desktop/bridge 联调时定稿**：`bridge.ts` 的方法面 / 结果形状 /
-> request 方向约定是最小设计，无事实源；消息只承载契约类型（SessionEnvelope / StandardAccess）
-> 与少量控制字段（id / method / destination 等），不发明业务字段。联调后以双方共同确认为准。
+native messaging 桥协议 v1**。零 UI、零宿主依赖，同一份代码可在扩展、单测、任意宿主里直接工作。
 
 ## 1. 依赖规则（单向依赖）
 
@@ -32,17 +27,11 @@ native messaging 桥协议 v1 + cookie 读写封装 + 桥收发/调度 + 协议�
 |---|---|
 | `types.ts` | `contracts/` 三个 schema 的 TS 镜像：枚举值域、`*_KEYS` / `*_REQUIRED_KEYS` 字段清单、接口、pattern |
 | `cookie.ts` | 浏览器 cookie ↔ 契约 `Cookie` 双向映射（含 `cookies.set` 写入参数）；http_only / secure / same_site / expires_at 一个不丢 |
-| `cookie_io.ts` | 浏览器 cookies API 读写封装（API 以 `CookiesApi` 显式注入）：读取（含 HttpOnly）/ 注入 / 清除（单域名、整账号）/ 目标登录态查询（B1.1–B1.3） |
 | `envelope.ts` | `SessionEnvelope` 编解码 + 结构校验镜像（schema_version、target 必填、kind/payload 一致性） |
-| `bridge.ts` | native messaging 桥协议 v1 消息定义：request / response / event 三类消息、方法面、事件面、错误码（**待与 desktop/bridge 联调时定稿**） |
-| `envelope_transport.ts` | 桥消息层的收发 + 错误处理：端口配对（`BridgeClient`）、内部动作 → 桥方法的协议翻译与 cookie 读写调度（`startBridgeHost`）、内部动作发送端（`createActionSender`） |
-| `protocol.ts` | 协议装配：client_env（UA/平台）随行（安全模型 §7'）、Target/SessionEnvelope 装配、扩展内部动作消息（popup/content/background 之间，不跨 desktop 桥） |
+| `bridge.ts` | native messaging 桥协议 v1：request / response / event 三类消息、方法面、事件面、错误码 |
 | `test/*.test.ts` | `node --test` 单测（含与 `contracts/*.schema.json` 逐字段比对） |
 | `tsconfig.json` | 库源码编译配置（只覆盖源码） |
 | `tsconfig.test.json` | 含测试的编译配置（需要 `@types/node`） |
-
-> 任务书中的 `protocol.ts`（消息类型定义）拆分落点：桥消息类型在 `bridge.ts`（既有唯一实现，
-> 不重复定义、不转发导出）；client_env 随行与扩展内部动作消息在 `protocol.ts`。
 
 ## 3. 与 Rust 侧（`core/contract/src/lib.rs` · ab-contract）的关系
 
@@ -146,11 +135,4 @@ npx tsc -p extensions/shared/tsconfig.test.json   # 含测试（需要 @types/no
   `validate_temporary` / `SessionRecord::validate`）。`StandardAccess::validate` 与
   `ConverterManifest::validate` 未实现：类型与 `*_KEYS` 字段清单已就绪，下一波可直接复用
   `validateSessionRecord`（standard-access 的 `sessions[]` 与信封共用同一份规则）。
-- 桥方法面 v1 为最小设计，**待与 desktop/bridge 联调时定稿**；其中两处已知待定点：
-  1. `session.query` 的候选返回以 `StandardAccess` 承载（docs 未定义「结构化候选」形状——待确认）；
-  2. `push.targets` 的 `{id, label}` 为控制字段（推送目标清单形状——待确认）。
-- 事件面（`state.changed` / `broker.revoked` / `host.disconnected`）v1 消费者待定：
-  `BridgeClient` 解码校验后不派发，不发明消费者。
-- `client_env.device_id` 扩展侧未采集（无稳定设备标识来源；契约语义为尽力记录——待确认）。
-- B1.3 目标登录态的桥方法面未定：`cookie_io.queryTargetState` 已提供（元数据、无 value），
-  但「Cookie 元数据」不是契约类型，消息承载格式待联调定稿——待确认。
+- 本波不含 `extensions/chromium/` 与 `extensions/firefox/` 的 manifest / popup / content / background。

@@ -1,14 +1,9 @@
 #!/usr/bin/env node
 /**
- * 转换器规范一致性检查（Node ≥ 22，零第三方依赖）。
- *
- * 覆盖：ABI 往返、沙盒白名单拒绝、extractor/normalizer 职责分界、逐等级 golden 对比、
- *       等级输出义务、日志脱敏、夹具脱敏 lint、清单占位签名、契约版本常量漂移。
+ * 转换器规范一致性检查（零第三方依赖）。
  *
  * 用法：
  *   node converters/sdk/tests/conformance.mjs [转换器目录] [--expect-placeholder-signature]
- * 默认目标：converters/_template，默认参数等价于
- *   node converters/sdk/tests/conformance.mjs converters/_template --expect-placeholder-signature
  */
 
 import { readdirSync, statSync } from "node:fs";
@@ -16,9 +11,12 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { AB_MAX_REQUEST_BYTES, STANDARD_ACCESS_SCHEMA_VERSION } from "../abi.mjs";
-import { SandboxError, createLocalHost, readJsonFile as readJson } from "../host-shim.mjs";
-
-/* ------------------------------------------------------------------ 参数 */
+import {
+  SandboxError,
+  createLocalHost,
+  isAbsoluteAnyPlatform,
+  readJsonFile as readJson,
+} from "../host-shim.mjs";
 
 const argv = process.argv.slice(2);
 const flags = new Set(argv.filter((a) => a.startsWith("--")));
@@ -28,8 +26,6 @@ const repoRoot = path.resolve(here, "..", "..", "..");
 const converterArg = positional[0] ?? "converters/_template";
 const converterDir = path.isAbsolute(converterArg) ? converterArg : path.join(repoRoot, converterArg);
 const expectPlaceholder = flags.has("--expect-placeholder-signature") || positional.length === 0;
-
-/* ------------------------------------------------------------- 迷你工具 */
 
 const results = [];
 function assert(condition, message) {
@@ -92,8 +88,6 @@ async function check(name, fn) {
 function section(title) {
   console.log(`\n${title}`);
 }
-
-/* --------------------------------------------------------- 脱敏 lint 规则 */
 
 const RESERVED_TLDS = new Set(["example", "invalid", "test", "localhost"]);
 const FILE_EXT = new Set([
@@ -159,8 +153,6 @@ function lintFixture(file, violations) {
   walk(readJson(file), [], null);
 }
 
-/* -------------------------------------------------------------------- main */
-
 console.log("AI-Bridge 转换器规范一致性检查（conformance）");
 console.log(`  Node            : ${process.version}`);
 console.log(`  目标转换器目录  : ${rel(converterDir)}`);
@@ -203,7 +195,6 @@ try {
   process.exit(1);
 }
 
-/* [1] 清单约定（schema 之外的 SDK 约定） */
 section("[1/9] 清单约定");
 await check("manifest.id / entry 形态符合 SDK 约定", () => {
   assert(/^[a-z0-9][a-z0-9-]{1,63}$/.test(manifest.id), `id 非法：${manifest.id}`);
@@ -213,7 +204,7 @@ await check("manifest.id / entry 形态符合 SDK 约定", () => {
 await check("readable_paths 每项都能展开为绝对路径且无通配", () => {
   assert(host.declaredPaths.length === manifest.readable_paths.length, "存在无法展开的声明路径");
   for (const item of host.declaredPaths) {
-    assert(path.isAbsolute(item.expanded), `未展开为绝对路径：${item.template}`);
+    assert(isAbsoluteAnyPlatform(item.expanded), `未展开为绝对路径：${item.template}`);
   }
 });
 if (expectPlaceholder) {
@@ -229,7 +220,6 @@ if (expectPlaceholder) {
   });
 }
 
-/* [2] 契约版本常量漂移 */
 section("[2/9] 契约常量一致性");
 await check("sdk 的 STANDARD_ACCESS_SCHEMA_VERSION 与契约 schema 的 const 一致", () => {
   const schema = readJson(path.join(repoRoot, "contracts", "standard-access.schema.json"));
@@ -240,7 +230,6 @@ await check("sdk 的 STANDARD_ACCESS_SCHEMA_VERSION 与契约 schema 的 const �
   );
 });
 
-/* [3] ABI 冒烟 */
 section("[3/9] WASM ABI 往返");
 const manifestLevelResult = await host.collect();
 allLogs.push(...manifestLevelResult.logs);
@@ -268,7 +257,6 @@ await check("同一入参两次采集结果一致（无隐藏状态）", () => {
   assertCanonEqual(second.json, first.json, "两次采集产物");
 });
 
-/* [4] 沙盒白名单 */
 section("[4/9] 只读沙盒白名单");
 await check("读取未在 readable_paths 声明的路径被拒绝", () => {
   let thrown = null;
@@ -284,7 +272,6 @@ await check("读取声明路径成功且夹具按 basename 挂载", () => {
   for (const file of rawFiles) host.readDeclared(path.basename(file));
 });
 
-/* [5] extractor 职责分界 */
 section("[5/9] extractor / normalizer 职责分界");
 const ALLOWED_RAW_KEYS = new Set(["collected_at", "source_files", "accounts", "cookies", "tokens", "plain_credentials", "launch"]);
 const CONTRACT_KEYS = new Set(["schema_version", "level", "sessions", "credentials", "meta"]);
@@ -318,7 +305,6 @@ await check("level=a 的中间格式不含任何账号/会话/凭据数据", () 
   assert(raw.launch?.app_id, "level=a 缺少启动信息");
 });
 
-/* [6] normalizer 纯函数 */
 section("[6/9] normalizer 纯函数约束");
 await check("normalize 不改动入参、可重复求值且结果一致", () => {
   const { raw } = runExtractor(manifest.level);
@@ -338,7 +324,6 @@ await check("normalize 不改动入参、可重复求值且结果一致", () => 
   assert(canonText(raw) === before, "normalize 改写了入参");
 });
 
-/* [7] 逐等级 golden 对比 */
 section("[7/9] 逐等级 golden 对比");
 assert(levels.includes(manifest.level), `缺少 manifest.level=${manifest.level} 的样例 fixtures/expected/standard-access.${manifest.level}.json`);
 for (const level of levels) {
@@ -367,7 +352,6 @@ for (const level of levels) {
   });
 }
 
-/* [8] 等级输出义务 */
 section("[8/9] 接入等级输出义务");
 await check("level=c：至少一条会话、cookie 属性完整、不得携带凭据", () => {
   const doc = goldenByLevel.get("c");
@@ -408,7 +392,6 @@ await check("level=a：不产出凭据与会话，只给启动信息", () => {
   assert(doc.meta?.launch?.app_id, "a 级必须给出 meta.launch.app_id");
 });
 
-/* [9] 脱敏 */
 section("[9/9] 脱敏（日志 + 夹具）");
 await check("运行日志不含任何敏感字段原值", () => {
   const secrets = [];
@@ -435,8 +418,6 @@ await check(`夹具脱敏 lint（${fixtureFiles.length} 个 JSON 文件）`, () 
   for (const file of fixtureFiles) lintFixture(file, violations);
   assert(violations.length === 0, `违规 ${violations.length} 处：\n${violations.join("\n")}`);
 });
-
-/* ------------------------------------------------------------------ 汇总 */
 
 const failed = results.filter((item) => !item.ok);
 console.log(`\n结果：${results.length} 项检查，${failed.length} 项失败`);

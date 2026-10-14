@@ -24,19 +24,9 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 
-/**
- * W2 候选条（输入法式小面板，热键唤起）。
- * 承载：B5（一次性复制 / 剪贴板清空）、B6（全局热键 / 窗口匹配）、B7（TOTP / 一键填充）、
- * A4.1（多账号切换）、A5（生成器内嵌）、D1/D2（带态启动）、C5（快捷吊销）。
- * 薄入口：候选结果与匹配规则在 core（ab-vault + ab-state）；本视图只呈现并回传选择。
- * 骨架期数据未接入（经 tauri command 从 core 取），故只显示空态。
- */
-
-/** 输入法式小面板的查询关键字属「输入中间态」白名单，可自持。 */
+// W2 候选条
 const keyword = ref('');
-
-/** 前台窗口 / 域名匹配（B6.2）由宿主提供，骨架期占位。 */
-const foreground = ref('（未接入）');
+const foreground = ref('—');
 </script>
 
 <style scoped>

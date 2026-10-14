@@ -1,19 +1,15 @@
 <template>
   <WindowShell title="配对向导" no="W12">
     <div class="view">
-      <p class="view__hint">
-        一次性窗口（用完即焚）。E3：仅局域网或面对面；QR 展示本机公钥 → 对方扫码 →
-        指纹确认（双方比对）。
-      </p>
       <ol class="steps">
         <li v-for="(step, index) in steps" :key="step" :class="{ 'steps__item--active': index === stepIndex }">
           {{ step }}
         </li>
       </ol>
 
-      <div v-if="stepIndex === 0" class="qr" role="img" aria-label="配对二维码占位">QR</div>
+      <div v-if="stepIndex === 0" class="qr" role="img" aria-label="配对二维码">QR</div>
       <p v-else-if="stepIndex === 1" class="view__empty">等待对方扫码…（局域网 / 面对面）</p>
-      <p v-else class="view__empty">指纹一致再确认；指纹由 core（ab-sync）计算</p>
+      <p v-else class="view__empty">两端指纹一致再确认</p>
 
       <div class="steps__actions">
         <button type="button" class="view__action" :disabled="stepIndex === 0" @click="prev">上一步</button>
@@ -29,10 +25,6 @@ import { computed, ref } from 'vue';
 import WindowShell from '../components/WindowShell.vue';
 import { useWindowControls } from '../../hooks/useWindowControls';
 
-/**
- * W12 配对向导（一次性窗口）。
- * 承载：E3 QR 配对 + 指纹确认步骤。密钥生成与指纹计算在 core（ab-sync），UI 不生成密钥。
- */
 const steps: readonly string[] = ['展示本机 QR（公钥入码）', '等待对方扫码与回传', '指纹确认'];
 
 const stepIndex = ref(0);

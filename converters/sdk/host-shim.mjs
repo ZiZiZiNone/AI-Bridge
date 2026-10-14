@@ -1,16 +1,5 @@
 /**
  * AI-Bridge 转换器 SDK —— 本地宿主垫片（转换器作者自测 / 夹具校验用）。
- *
- * 它只做真实宿主（core/converter-host）按 ABI 必做的那几件事：
- *   1. 读 manifest.json，把 readable_paths 展开成沙盒白名单（只读、未声明即拒绝）；
- *   2. 按 ABI 写请求、调 `ab_run`、按 i64 打包值读回响应；
- *   3. 每次采集新建一个 guest 实例（无跨次状态残留）。
- *
- * 它**不做**结构校验、不做业务判断：StandardAccess 的校验权威在 ab-contract。
- * 它也不提供网络、写文件、时间等能力：guest 只有 ab_read_file / ab_log 两个导入。
- *
- * 本地约定：manifest.entry = "converter.wasm" 时，垫片加载同目录同名的 `converter.mjs`
- * 作为可运行的参考实现（真实宿主加载 .wasm，其余 ABI 完全一致）。
  */
 
 import { readFileSync } from "node:fs";
@@ -28,13 +17,8 @@ import {
   utf8Encode,
 } from "./abi.mjs";
 
-/** 沙盒拒绝：请求了未在 manifest.readable_paths 声明的路径。 */
 export class SandboxError extends Error {}
 
-/**
- * SDK 约定：清单与夹具一律 UTF-8 无 BOM。
- * 带 BOM 时明确报错而不是静默清洗——静默清洗会让「转换器读真实文件失败」在本地被掩盖。
- */
 export function parseJsonText(text, label) {
   const clean = String(text);
   if (clean.charCodeAt(0) === 0xfeff) {
@@ -43,13 +27,21 @@ export function parseJsonText(text, label) {
   return JSON.parse(clean);
 }
 
-/** 读 JSON 文件（含上面的 BOM 约定检查）。 */
 export function readJsonFile(file) {
   return parseJsonText(readFileSync(file, "utf8"), file);
 }
 
-/** 夹具挂载点名称（tests/fixtures/raw/ 下的文件名 = 声明路径的 basename）。 */
 export const FIXTURE_DIR_SEGMENTS = ["tests", "fixtures", "raw"];
+
+export function isAbsoluteAnyPlatform(p) {
+  const text = String(p);
+  return path.posix.isAbsolute(text) || path.win32.isAbsolute(text);
+}
+
+export function basenameAnyPlatform(p) {
+  const text = String(p);
+  return text.includes("\\") ? path.win32.basename(text) : path.basename(text);
+}
 
 function expandTemplate(template, env) {
   const expanded = String(template).replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_all, name) => {
@@ -57,31 +49,32 @@ function expandTemplate(template, env) {
     if (!value) throw new SandboxError(`可读路径模板引用了未定义的环境变量 {${name}}`);
     return value;
   });
-  if (!path.isAbsolute(expanded)) throw new SandboxError(`可读路径展开后不是绝对路径：${template}`);
-  if (expanded.includes("..") || expanded.includes("*")) throw new SandboxError(`可读路径不得含 .. 或 *：${template}`);
+  if (!isAbsoluteAnyPlatform(expanded)) {
+    throw new SandboxError(`可读路径展开后不是绝对路径：${template}`);
+  }
+  if (expanded.includes("..") || expanded.includes("*")) {
+    throw new SandboxError(`可读路径不得含 .. 或 *：${template}`);
+  }
   return expanded;
 }
 
-/**
- * @param {object} options
- * @param {string} options.converterDir 转换器目录（含 manifest.json 与参考入口）
- * @param {Record<string,string>} [options.env] 用于展开 {ENV} 模板的环境变量表
- * @param {string} [options.fixtureDir] 夹具目录，默认 <converterDir>/tests/fixtures/raw
- * @param {() => string} [options.now] 宿主时钟（注入项，转换器不得自取时间）
- */
 export async function createLocalHost(options) {
   const converterDir = path.resolve(options.converterDir);
-  const env = options.env ?? process.env;
+  const env = options.env ?? {
+    APPDATA: "C:\\Users\\Default\\AppData\\Roaming",
+    LOCALAPPDATA: "C:\\Users\\Default\\AppData\\Local",
+    USERPROFILE: "C:\\Users\\Default",
+    ...process.env,
+  };
   const fixtureDir = options.fixtureDir ?? path.join(converterDir, ...FIXTURE_DIR_SEGMENTS);
   const now = options.now ?? (() => new Date().toISOString());
 
   const manifest = readJsonFile(path.join(converterDir, "manifest.json"));
 
-  // basename -> 声明原文；夹具与真实路径都按 basename 对齐
   const declared = new Map();
   for (const template of manifest.readable_paths ?? []) {
     const expanded = expandTemplate(template, env);
-    declared.set(path.basename(expanded).toLowerCase(), { template, expanded });
+    declared.set(basenameAnyPlatform(expanded).toLowerCase(), { template, expanded });
   }
 
   const entryName = `${path.parse(manifest.entry ?? "").name}.mjs`;
@@ -95,12 +88,11 @@ export async function createLocalHost(options) {
   const logs = [];
 
   const hostImports = {
-    /** 宿主唯一文件能力：只读、且只对声明路径开放。 */
     ab_read_file(ptr, len) {
       let name;
       try {
         name = readString(instance.memory, ptr, len);
-      } catch (err) {
+      } catch {
         return AB_FAILURE;
       }
       let bytes;
@@ -119,19 +111,18 @@ export async function createLocalHost(options) {
       try {
         logs.push({ level, message: readString(instance.memory, ptr, len) });
       } catch {
-        // 日志本身不允许影响转换结果
+        // 日志错误不影响转换结果
       }
     },
   };
 
   function readDeclared(name) {
-    const base = path.basename(String(name)).toLowerCase();
+    const base = basenameAnyPlatform(String(name)).toLowerCase();
     const hit = declared.get(base);
     if (!hit) throw new SandboxError(`路径未在 manifest.readable_paths 声明，拒绝读取：${name}`);
     return new Uint8Array(readFileSync(path.join(fixtureDir, base)));
   }
 
-  /** 组装宿主侧请求（时钟与清单信息由宿主注入，转换器不得自取）。 */
   function buildRequest(overrides = {}) {
     return {
       op: AB_OP_CONVERT,
@@ -143,7 +134,6 @@ export async function createLocalHost(options) {
     };
   }
 
-  /** 按 ABI 跑一次采集：每次都是全新实例。 */
   function runRaw(request) {
     logs.length = 0;
     instance = entryModule.createInstance(hostImports);
@@ -168,7 +158,6 @@ export async function createLocalHost(options) {
     fixtureDir,
     manifest,
     declaredPaths: [...declared.values()],
-    /** 沙盒读取（供测试直接验证白名单拒绝行为）。 */
     readDeclared,
     buildRequest,
     runRaw,

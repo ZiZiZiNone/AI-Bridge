@@ -83,7 +83,14 @@ function decodeRaw(value: unknown): BridgeMessage {
 test("v1 词表固定：版本 / 消息类别 / 方法 / 事件 / 错误码 / 方言", () => {
   assert.equal(BRIDGE_PROTOCOL_VERSION, 1);
   assert.deepEqual(BRIDGE_MESSAGE_TYPES, ["request", "response", "event"]);
-  assert.deepEqual(BRIDGE_METHODS, ["handshake", "session.query", "session.fetch", "session.capture", "session.inject", "push.targets", "credential.fill", "ping"]);
+  assert.deepEqual(BRIDGE_METHODS, [
+    "handshake",
+    "session.capture",
+    "session.inject",
+    "session.proxy_fetch",
+    "credential.fill",
+    "ping",
+  ]);
   assert.deepEqual(BRIDGE_EVENTS, ["state.changed", "broker.revoked", "host.disconnected"]);
   assert.deepEqual(BRIDGE_ERROR_CODES, ["unknown_method", "unsupported_version", "invalid_params", "denied", "internal"]);
   assert.deepEqual(BRIDGE_DIALECTS, ["chromium", "firefox"]);
@@ -141,7 +148,14 @@ test("event 往返：broker.revoked 载荷", () => {
     v: BRIDGE_PROTOCOL_VERSION,
     type: "event",
     event: "broker.revoked",
-    payload: { account_ref: "acc-1", revoked_at: "2026-10-09T00:00:00Z" },
+    payload: {
+      account_ref: "acc-1",
+      revoked_at: "2026-10-09T00:00:00Z",
+      session_id: "tmp-1",
+      domain: "github.com",
+      cookie_names: ["sid"],
+      clear_storage: true,
+    },
     emitted_at: "2026-10-09T00:00:01Z",
   };
   const decoded = decodeBridgeMessage(encodeBridgeMessage(revoke));
@@ -153,7 +167,7 @@ test("event 往返：broker.revoked 载荷", () => {
   assert.equal(decoded.emitted_at, "2026-10-09T00:00:01Z");
 });
 
-test("session.inject：协议层与契约层职责分离（信封独立校验）", () => {
+test("session.inject 与 session.proxy_fetch：协议层与契约层职责分离", () => {
   const envelope = cookieEnvelope();
   const request: BridgeRequest = {
     v: BRIDGE_PROTOCOL_VERSION,
@@ -167,6 +181,20 @@ test("session.inject：协议层与契约层职责分离（信封独立校验）
     assert.fail("应为 session.inject 请求");
   }
   assert.deepEqual(decodeEnvelope(JSON.stringify(decoded.params.envelope)), envelope);
+
+  const proxyFetch: BridgeRequest = {
+    v: BRIDGE_PROTOCOL_VERSION,
+    type: "request",
+    id: "req-proxy-1",
+    method: "session.proxy_fetch",
+    params: {
+      session_id: "tmp-1",
+      account_ref: "acc-1",
+      url: "https://api.github.com/user",
+      method: "GET",
+    },
+  };
+  assert.deepEqual(decodeBridgeMessage(encodeBridgeMessage(proxyFetch)), proxyFetch);
 });
 
 test("解码拒绝：版本 / 类别 / 方法 / id / 额外字段 / 参数形状", () => {

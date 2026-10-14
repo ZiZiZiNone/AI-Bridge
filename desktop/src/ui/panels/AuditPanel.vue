@@ -1,11 +1,6 @@
 <template>
   <WindowShell title="审计" no="W6">
     <div class="view">
-      <p class="view__hint">
-        C3 审计流：谁 / 何时 / 账号 / 域名 / 动作 / 结果；筛选与加密导出。
-        审计记录由 core（ab-audit）追加式写入，只读呈现；UI 不修改历史。
-      </p>
-
       <table class="audit">
         <thead>
           <tr>
@@ -30,11 +25,6 @@
 
 <script setup lang="ts">
 import WindowShell from '../components/WindowShell.vue';
-
-/**
- * W6 审计面板（弹出面板）。
- * 骨架：表头即审计字段口径（C3.1）；记录经 tauri command 从 core 取，接入后替换空态。
- */
 </script>
 
 <style scoped>

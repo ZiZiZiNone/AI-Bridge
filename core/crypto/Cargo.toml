@@ -8,11 +8,7 @@ description = "密码学原语封装：全仓唯一允许引入密码学依赖�
 serde.workspace = true
 argon2 = "0.5"
 aes-gcm = "0.10"
-aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
-chacha20 = "0.10"
 hmac = "0.12"
-sha1 = "0.10"
 sha2 = "0.10"
 hkdf = "0.12"
 ed25519-dalek = { version = "2", features = ["rand_core"] }

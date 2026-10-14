@@ -2,19 +2,15 @@
 /**
  * AI-Bridge 桌面端结构一致性检查（零依赖，Node ≥ 18）。
  *
- * 检查的是「同一规则是否只写一份、且各处一致」这类硬规则（工程硬规则的可执行化）：
- *   1. src-tauri 模块结构 == docs/目录结构.md 指定的 ui/{tray,candidate,panels,wizard}、
- *      native/{dpapi,hello,clipboard,uia_typing,protocol}、bridge/{messaging_host,ext_protocol}
- *   2. W1–W15 各一个视图骨架，且分组数量正确（托盘 2 / 候选条 1 / 面板 8 / 向导 4）
- *   3. 显示名一律 AI-Bridge，全文不得出现作废名 SecureBox
+ * 检查项：
+ *   1. src-tauri 模块结构符合 docs/目录结构.md
+ *   2. W1–W15 各一个视图且分组数量正确（托盘 2 / 候选条 1 / 面板 8 / 向导 4）
+ *   3. 显示名一律 AI-Bridge，全文不得出现旧名
  *   4. 窗口标签表：src-tauri WINDOW_SPECS ↔ src/ui/window-registry.ts WINDOW_VIEWS（13 个，双向相等）
  *   5. 托盘菜单：src-tauri MENU_ITEMS ↔ src/ui/tray/TrayMenu.vue（id + label 全等）
  *   6. 契约字段：contracts/*.schema.json ↔ src/types/contract.ts 逐字段一致（含必填性）
- *   7. 依赖方向：native/ 与 bridge/ 不依赖 tauri、不依赖 ui；core 不得反向依赖 desktop
- *      （desktop → core → contracts 是合法方向，宿主允许 use ab_*）
+ *   7. 依赖方向：native/ 与 bridge/ 不依赖 tauri 与 crate::ui；core 不反向依赖 desktop
  *   8. SFC 块顺序 template → script → style，且 script 为 lang="ts"
- *
- * 用法：npm run check:structure（失败以非零码退出并逐条列出原因）
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -25,6 +21,7 @@ const DESKTOP = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO = resolve(DESKTOP, '..');
 const UI_SRC = join(DESKTOP, 'src', 'ui');
 const RUST_SRC = join(DESKTOP, 'src-tauri', 'src');
+const CORE_DIR = join(REPO, 'core');
 
 const SKIP_DIRS = new Set(['node_modules', '.npm-cache', 'dist', 'target', '.render-check', 'gen', 'icons']);
 
@@ -59,16 +56,13 @@ function walk(dir) {
 }
 
 const rel = (path) => relative(DESKTOP, path).replaceAll('\\', '/');
+const relRepo = (path) => relative(REPO, path).replaceAll('\\', '/');
 
-/** 界面视图 = 四组目录（ui/tray、ui/candidate、ui/panels、ui/wizard）下的 .vue；
- *  ui/components 下的共用组件不算界面（不占 W 编号）。 */
 const VIEW_GROUPS = ['tray', 'candidate', 'panels', 'wizard'];
 const viewFiles = () =>
   VIEW_GROUPS.flatMap((group) =>
     walk(join(UI_SRC, group)).filter((path) => path.endsWith('.vue')),
   );
-
-/* ---------------- 1. Rust 模块结构 ---------------- */
 
 const REQUIRED_RUST = [
   'ui/mod.rs',
@@ -94,8 +88,6 @@ check('1. src-tauri 模块结构符合 docs/目录结构.md', () => {
   assert(missing.length === 0, `缺少模块：${missing.join('、')}`);
   return `${REQUIRED_RUST.length} 个模块齐备`;
 });
-
-/* ---------------- 2. W1–W15 视图清单 ---------------- */
 
 const GROUP_EXPECTED = { tray: 2, candidate: 1, panels: 8, wizard: 4 };
 
@@ -124,8 +116,6 @@ check('2. W1–W15 各一个视图骨架且分组数量正确', () => {
   return `15 个界面：托盘 2 + 候选条 1 + 面板 8 + 向导 4`;
 });
 
-/* ---------------- 3. 显示名 ---------------- */
-
 check('3. 显示名一律 AI-Bridge，无作废名 SecureBox', () => {
   const config = JSON.parse(read(join(DESKTOP, 'src-tauri', 'tauri.conf.json')));
   assert(config.productName === 'AI-Bridge', `productName 应为 AI-Bridge，实际 ${config.productName}`);
@@ -136,25 +126,21 @@ check('3. 显示名一律 AI-Bridge，无作废名 SecureBox', () => {
 
   const selfPath = fileURLToPath(import.meta.url);
   const offenders = walk(DESKTOP)
-    .filter((path) => path !== selfPath) // 本检查脚本自身含禁用词字面量，不参与扫描
+    .filter((path) => path !== selfPath)
     .filter((path) => !/\.(png|ico|woff2?|ttf)$/i.test(path))
     .filter((path) => read(path).includes('SecureBox'));
   assert(offenders.length === 0, `出现作废名 SecureBox：${offenders.map(rel).join('、')}`);
   return 'productName / index.html / 全部源码均符合';
 });
 
-/* ---------------- 4. 窗口标签表 ---------------- */
-
 function rustWindowLabels() {
   const source = read(join(RUST_SRC, 'ui', 'window.rs'));
-  // 先把 &str 常量（如 CANDIDATE_LABEL）替换回字面量，标签表里允许用常量。
   const consts = new Map(
     [...source.matchAll(/pub const ([A-Z_]{3,})\s*:[^=]*=\s*"([^"]+)";/g)].map((m) => [m[1], m[2]]),
   );
 
   const block = source.slice(source.indexOf('pub const WINDOW_SPECS'));
   const end = block.indexOf('\n];');
-  // 常量在清单里只作为字符串取值使用，替换回字面量（带引号）后再抽取标签。
   const body = (end === -1 ? block : block.slice(0, end)).replace(/\b([A-Z_]{3,})\b/g, (name) => {
     const value = consts.get(name);
     return value === undefined ? name : `"${value}"`;
@@ -181,8 +167,6 @@ check('4. 窗口标签表 Rust WINDOW_SPECS ↔ TS WINDOW_VIEWS', () => {
   return `13 个标签双向一致（${rust.join(', ')}）`;
 });
 
-/* ---------------- 5. 托盘菜单 ---------------- */
-
 function rustMenuItems() {
   const source = read(join(RUST_SRC, 'ui', 'tray', 'menu.rs'));
   const block = source.slice(source.indexOf('pub const MENU_ITEMS'));
@@ -206,8 +190,6 @@ check('5. 托盘菜单 Rust MENU_ITEMS ↔ TrayMenu.vue', () => {
   });
   return `11 项 id + label 全等`;
 });
-
-/* ---------------- 6. 契约字段逐字段一致 ---------------- */
 
 const CONTRACT_MAP = [
   ['standard-access.schema.json', 'StandardAccess', ['properties']],
@@ -233,7 +215,7 @@ function schemaNode(schema, path) {
 
 function tsInterfaceFields(source, name) {
   const match = source.match(new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`));
-  assert(match !== null, `src/types/contract.ts 缺少 interface ${name}`);
+  assert(match !== null, `契约类型源码缺少 interface ${name}`);
   const body = match[1];
   return [...body.matchAll(/^\s{2}([A-Za-z_][A-Za-z0-9_]*)(\?)?:/gm)].map((m) => ({
     name: m[1],
@@ -241,15 +223,22 @@ function tsInterfaceFields(source, name) {
   }));
 }
 
+function loadContractTsSource() {
+  const contractTs = read(join(DESKTOP, 'src', 'types', 'contract.ts'));
+  if (/export\s+\*\s+from\s+['"]\.\.\/\.\.\/\.\.\/extensions\/shared\/types(?:\.ts)?['"]/.test(contractTs)) {
+    return read(join(REPO, 'extensions', 'shared', 'types.ts'));
+  }
+  return contractTs;
+}
+
 check('6. 契约字段逐字段一致（contracts/*.schema.json ↔ src/types/contract.ts）', () => {
-  const tsSource = read(join(DESKTOP, 'src', 'types', 'contract.ts'));
+  const tsSource = loadContractTsSource();
   let fieldCount = 0;
 
   for (const [schemaFile, interfaceName, path] of CONTRACT_MAP) {
     const schema = JSON.parse(read(join(REPO, 'contracts', schemaFile)));
     const node = schemaNode(schema, path);
     const schemaFields = Object.keys(node);
-    // required 声明在承载 properties 的对象节点上（path 的父层），不在 properties 节点自身
     const required = new Set(schemaNode(schema, path.slice(0, -1)).required ?? []);
     const tsFields = tsInterfaceFields(tsSource, interfaceName);
 
@@ -273,11 +262,9 @@ check('6. 契约字段逐字段一致（contracts/*.schema.json ↔ src/types/co
   return `${CONTRACT_MAP.length} 个类型 / ${fieldCount} 个字段一致（含必填性）`;
 });
 
-/* ---------------- 7. 依赖方向 ---------------- */
-
-check('7. 依赖方向：native/ 与 bridge/ 不碰 tauri 与 ui；core 不得反向依赖 desktop', () => {
+check('7. 依赖方向：native/ 与 bridge/ 不碰 tauri 与 ui；core 不反向依赖 desktop', () => {
   const nativeAndBridge = walk(RUST_SRC).filter(
-    (path) => /(native|bridge)[\\/]/.test(path) && path.endsWith('.rs'),
+    (path) => /^src-tauri\/src\/(native|bridge)\//.test(rel(path)) && path.endsWith('.rs'),
   );
 
   for (const path of nativeAndBridge) {
@@ -286,23 +273,17 @@ check('7. 依赖方向：native/ 与 bridge/ 不碰 tauri 与 ui；core 不得�
     assert(!/^\s*use\s+crate::ui/m.test(source), `${rel(path)} 反向依赖了 crate::ui`);
   }
 
-  // 架构方向（P1-13 修正）：desktop → core → contracts 是**正确**依赖方向，
-  // 宿主允许 use ab_*；反向（core 引用 desktop）才是违反分层。
-  // core/**/Cargo.toml 不得出现指向 desktop 的路径依赖。
-  const coreManifests = walk(join(REPO, 'core')).filter((path) => path.endsWith('Cargo.toml'));
-  let coreCrateCount = 0;
-  for (const path of coreManifests) {
-    coreCrateCount += 1;
+  const coreFiles = existsSync(CORE_DIR)
+    ? walk(CORE_DIR).filter((path) => path.endsWith('.rs') || path.endsWith('Cargo.toml'))
+    : [];
+  for (const path of coreFiles) {
     const source = read(path);
-    assert(
-      !/desktop/.test(source),
-      `${rel(path)} 反向依赖了 desktop（core → desktop 违反分层：宿主→core→契约）`,
-    );
+    assert(!/\bab[_-]desktop\b/.test(source), `${relRepo(path)} 反向依赖了 desktop`);
+    assert(!/^\s*use\s+tauri::/m.test(source), `${relRepo(path)} 依赖了宿主框架 tauri`);
   }
-  return `${nativeAndBridge.length} 个 native/bridge 文件 + ${coreCrateCount} 个 core Cargo.toml 方向正确`;
-});
 
-/* ---------------- 8. SFC 块顺序 ---------------- */
+  return `${nativeAndBridge.length} 个 native/bridge 文件 + ${coreFiles.length} 个 core 文件方向正确`;
+});
 
 check('8. SFC 块顺序 template → script → style，script 为 lang="ts"', () => {
   const files = viewFiles().concat([
@@ -325,8 +306,6 @@ check('8. SFC 块顺序 template → script → style，script 为 lang="ts"', (
   }
   return `${files.length} 个 SFC 块顺序正确`;
 });
-
-/* ---------------- 输出 ---------------- */
 
 let failed = 0;
 for (const result of results) {

@@ -1,11 +1,6 @@
 <template>
   <WindowShell title="转换器" no="W8">
     <div class="view">
-      <p class="view__hint">
-        B4.1 转换器管理：官方验签、启用开关、接入等级（c 会话注入 / b 凭据填表 / a 仅启动）、
-        可读路径声明。仅官方签发（S5），验签结果与沙盒执行由 core（ab-converter）负责，UI 只呈现。
-      </p>
-
       <StateBlock
         :state="props.state"
         :error-message="props.errorMessage"
@@ -43,10 +38,6 @@ import WindowShell from '../components/WindowShell.vue';
 import type { AccessLevel, ConverterManifest } from '../../types/contract';
 import type { UIState } from '../../types/ui';
 
-/**
- * W8 转换器面板（弹出面板）。
- * 受控视图：清单由 core 验签后注入；本视图只按契约字段呈现，不判断验签结果。
- */
 interface Props {
   manifests?: ConverterManifest[];
   state?: UIState;
@@ -63,7 +54,6 @@ const emit = defineEmits<{
   retry: [];
 }>();
 
-/** 接入等级的中文口径（仅展示映射，等级语义定义在契约与 core）。 */
 const LEVEL_TEXT: Readonly<Record<AccessLevel, string>> = {
   c: 'c 会话注入',
   b: 'b 凭据填表',

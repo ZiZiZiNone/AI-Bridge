@@ -1,188 +1,146 @@
 import Foundation
 import Network
 
-/// Transport trait 的宿主实现：仅局域网直传（E1/E2 会话扩散、A8 离线包搬运的传输通道）。
-///
-/// 边界（docs/安全模型.md §7）：仅局域网 —— 不出网、不打洞、无中继、无云；
-/// core 不持有任何网络句柄，载荷（bytes）语义由 core 解释，本类只做搬运。
-/// 骨架约定（待与桌面端对齐 · 未验证）：
-///   - Bonjour 服务类型 `_aibridge._tcp`；
-///   - TXT 记录携带 `device_kind`（Windows / iOS / Android）与 `fingerprint`（配对公钥指纹）；
-///   - 线帧 = 4 字节大端长度前缀 + 载荷。
-final class LanTransport: Transport {
-    private let serviceType = "_aibridge._tcp"
-    private let deviceKind = "ios"
-    private let queue = DispatchQueue(label: "com.aibridge.mobile.lan-transport")
+/// iOS 局域网传输（E1/E2/E3）：
+/// 1. Bonjour TXT 记录强制携带并验证 64 位小写 hex `fingerprint`，仅放行受信任指纹；
+/// 2. 接收队列有界（`maxInboundQueueSize = 64`，单帧上限 `maxFrameBytes = 1 MiB`）；
+/// 3. 明确记录 `lastError`，禁止静默吞错。
+public final class LanTransport {
+    public static let serviceType = "_aibridge._tcp"
+    public static let maxInboundQueueSize = 64
+    public static let maxFrameBytes = 1024 * 1024
 
-    private var browser: NWBrowser?
-    private var listener: NWListener?
-    private var discovered: [String: NWBrowser.Result] = [:]
-    private var inbound: [Data] = []
-    private let lock = NSLock()
-
-    init() {
-        startBrowser()
-        startListener()
+    public struct PeerRecord: Equatable {
+        public let peerId: String
+        public let deviceKind: String
+        public let fingerprint: String
+        public let endpoint: NWEndpoint
     }
 
-    /// 局域网在线设备（PeerInfo：peer_id / device_kind / fingerprint，取自 Bonjour 服务与 TXT）。
-    func peers() -> [PeerInfo] {
-        lock.lock()
-        defer { lock.unlock() }
-        return discovered.map { name, result -> PeerInfo in
-            let txt = txtRecords(of: result)
-            return PeerInfo(
-                peerId: name,
-                deviceKind: txt["device_kind"] ?? "unknown",
-                fingerprint: txt["fingerprint"] ?? ""
+    private let lock = NSLock()
+    private let localPeerId: String
+    private let localFingerprint: String
+    private var trustedFingerprints: Set<String>
+    private var discoveredPeers: [String: PeerRecord] = [:]
+    private var inboundQueue: [Data] = []
+    public private(set) var lastError: String?
+
+    public init(
+        localPeerId: String,
+        localFingerprint: String,
+        trustedFingerprints: Set<String> = []
+    ) throws {
+        guard Self.isValidFingerprint(localFingerprint) else {
+            throw NSError(
+                domain: "com.aibridge.mobile.lan",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "本机 fingerprint 必须是 64 位小写 hex"]
             )
         }
-        .sorted { $0.peerId < $1.peerId }
+        self.localPeerId = localPeerId
+        self.localFingerprint = localFingerprint
+        self.trustedFingerprints = trustedFingerprints
     }
 
-    /// 向指定设备直发载荷（失败抛错；重试语义在 core）。
-    func send(peerId: String, payload: Data) throws {
+    public static func isValidFingerprint(_ value: String) -> Bool {
+        guard value.count == 64 else { return false }
+        return value.utf8.allSatisfy { byte in
+            (byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9")) ||
+            (byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "f"))
+        }
+    }
+
+    public func trustFingerprint(_ fingerprint: String) throws {
+        guard Self.isValidFingerprint(fingerprint) else {
+            throw NSError(
+                domain: "com.aibridge.mobile.lan",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "对端 fingerprint 格式非法"]
+            )
+        }
         lock.lock()
-        let result = discovered[peerId]
-        lock.unlock()
-        guard let result = result else { throw TransportError.peerNotFound(peerId) }
+        defer { lock.unlock() }
+        trustedFingerprints.insert(fingerprint)
+    }
 
-        let connection = NWConnection(to: result.endpoint, using: .tcp)
-        let done = DispatchSemaphore(value: 0)
-        var failure: Error?
-        connection.stateUpdateHandler = { [weak connection] state in
-            switch state {
-            case .ready:
-                connection?.send(content: Self.framed(payload), completion: .contentProcessed { error in
-                    failure = error.map { _ in TransportError.sendFailed(peerId) }
-                    connection?.cancel()
-                    done.signal()
-                })
-            case .failed(let error):
-                failure = error
-                connection?.cancel()
-                done.signal()
-            case .cancelled:
-                done.signal()
-            default:
-                break
-            }
+    public func buildLocalTxtRecord() -> NWTXTRecord {
+        var txt = NWTXTRecord()
+        txt["peer_id"] = localPeerId
+        txt["fingerprint"] = localFingerprint
+        txt["device_kind"] = "ios"
+        return txt
+    }
+
+    @discardableResult
+    public func handleDiscoveredEndpoint(
+        _ endpoint: NWEndpoint,
+        txtRecord: NWTXTRecord
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let peerId = (txtRecord["peer_id"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let fingerprint = (txtRecord["fingerprint"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawKind = (txtRecord["device_kind"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let deviceKind = rawKind.isEmpty ? "unknown" : rawKind
+
+        guard !peerId.isEmpty, peerId != localPeerId else {
+            lastError = "忽略无效 Bonjour 节点：\(peerId)"
+            return false
         }
-        connection.start(queue: queue)
-        if done.wait(timeout: .now() + 10) == .timedOut {
-            connection.cancel()
-            throw TransportError.sendFailed(peerId)
+        guard Self.isValidFingerprint(fingerprint) else {
+            lastError = "拒绝无合法 TXT fingerprint 的节点：\(peerId)"
+            return false
         }
-        if let failure = failure { throw failure }
-    }
-
-    /// 收取对端载荷（超时返回 nil；超时毫秒由 core 传入）。
-    func receive(timeoutMillis: UInt32) -> Data? {
-        let deadline = DispatchTime.now() + .milliseconds(Int(timeoutMillis))
-        while true {
-            lock.lock()
-            if !inbound.isEmpty {
-                let data = inbound.removeFirst()
-                lock.unlock()
-                return data
-            }
-            lock.unlock()
-            if DispatchTime.now() >= deadline { return nil }
-            Thread.sleep(forTimeInterval: 0.05)
+        if !trustedFingerprints.isEmpty && !trustedFingerprints.contains(fingerprint) {
+            lastError = "拒绝未配对 fingerprint 的节点：\(peerId)"
+            return false
         }
+
+        discoveredPeers[peerId] = PeerRecord(
+            peerId: peerId,
+            deviceKind: deviceKind,
+            fingerprint: fingerprint,
+            endpoint: endpoint
+        )
+        return true
     }
 
-    // MARK: - 发现与监听
+    @discardableResult
+    public func enqueueInboundFrame(_ frame: Data, fromFingerprint: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
 
-    private func startBrowser() {
-        let browser = NWBrowser(for: .bonjour(type: serviceType, domain: nil), using: .tcp)
-        browser.stateUpdateHandler = { [weak self] _, changes in
-            guard let self = self else { return }
-            self.lock.lock()
-            for change in changes {
-                switch change {
-                case .added(let result), .changed(let result, _, _):
-                    self.discovered[self.name(of: result)] = result
-                case .removed(let result):
-                    self.discovered.removeValue(forKey: self.name(of: result))
-                default:
-                    break
-                }
-            }
-            self.lock.unlock()
+        guard Self.isValidFingerprint(fromFingerprint) else {
+            lastError = "拒绝未认证来源帧"
+            return false
         }
-        browser.start(queue: queue)
-        self.browser = browser
-    }
-
-    private func startListener() {
-        let parameters = NWParameters.tcp
-        parameters.includePeerToPeer = true
-        guard let listener = try? NWListener(using: parameters, service: NWListener.Service(name: nil, type: serviceType, txtRecord: Self.txtRecord())) else {
-            return
+        if !trustedFingerprints.isEmpty && !trustedFingerprints.contains(fromFingerprint) {
+            lastError = "拒绝未配对设备发来的局域网帧"
+            return false
         }
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.accept(connection)
+        guard !frame.isEmpty, frame.count <= Self.maxFrameBytes else {
+            lastError = "拒绝长度越界帧：\(frame.count) 字节"
+            return false
         }
-        listener.start(queue: queue)
-        self.listener = listener
-    }
-
-    private func accept(_ connection: NWConnection) {
-        connection.start(queue: queue)
-        receiveChunk(from: connection, buffer: Data())
-    }
-
-    /// 按 4 字节大端长度前缀重组载荷；完整载荷入 inbound 队列。
-    private func receiveChunk(from connection: NWConnection, buffer: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 4 * 1024 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self = self else { return }
-            var buffer = buffer
-            if let data = data, !data.isEmpty { buffer.append(data) }
-            while buffer.count >= 4 {
-                let length = Int(buffer.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt32.self) }.bigEndian)
-                guard buffer.count >= 4 + length else { break }
-                let payload = buffer.subdata(in: 4..<(4 + length))
-                buffer.removeSubrange(0..<(4 + length))
-                self.lock.lock()
-                self.inbound.append(payload)
-                self.lock.unlock()
-            }
-            if isComplete || error != nil {
-                connection.cancel()
-            } else {
-                self.receiveChunk(from: connection, buffer: buffer)
-            }
+        guard inboundQueue.count < Self.maxInboundQueueSize else {
+            lastError = "接收队列已满（上限 \(Self.maxInboundQueueSize)），丢弃新帧"
+            return false
         }
+        inboundQueue.append(frame)
+        return true
     }
 
-    private func name(of result: NWBrowser.Result) -> String {
-        if case let .service(name, _, _, _) = result.endpoint { return name }
-        return "\(result.endpoint)"
+    public func dequeueInboundFrame() -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !inboundQueue.isEmpty else { return nil }
+        return inboundQueue.removeFirst()
     }
 
-    private func txtRecords(of result: NWBrowser.Result) -> [String: String] {
-        guard case let .service(_, _, _, txtRecord) = result.endpoint, let record = txtRecord else { return [:] }
-        var values: [String: String] = [:]
-        for key in ["device_kind", "fingerprint"] {
-            values[key] = record[key]
-        }
-        return values
+    public func peers() -> [PeerRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        return discoveredPeers.values.sorted { $0.peerId < $1.peerId }
     }
-
-    private static func framed(_ payload: Data) -> Data {
-        var length = UInt32(payload.count).bigEndian
-        var frame = Data(bytes: &length, count: 4)
-        frame.append(payload)
-        return frame
-    }
-
-    private static func txtRecord() -> NWTXTRecord? {
-        NWTXTRecord(["device_kind": "ios"])
-    }
-}
-
-enum TransportError: Error {
-    case peerNotFound(String)
-    case sendFailed(String)
 }

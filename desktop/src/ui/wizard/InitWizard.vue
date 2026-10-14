@@ -1,9 +1,6 @@
 <template>
   <WindowShell title="初始化向导" no="W11">
     <div class="view">
-      <p class="view__hint">
-        一次性窗口（用完即焚）。建库 → S1 主密码（Argon2id）→ S3 恢复密钥（只展示一次，离线保存）。
-      </p>
       <ol class="steps">
         <li v-for="(step, index) in steps" :key="step" :class="{ 'steps__item--active': index === stepIndex }">
           {{ step }}
@@ -24,11 +21,6 @@ import { computed, ref } from 'vue';
 import WindowShell from '../components/WindowShell.vue';
 import { useWindowControls } from '../../hooks/useWindowControls';
 
-/**
- * W11 初始化向导（一次性窗口）。
- * 承载：建库、S1 解锁、S3 恢复密钥。
- * 步骤导航属纯交互状态（丢失只影响本次交互），业务规则（口令强度、恢复密钥生成）在 core。
- */
 const steps: readonly string[] = [
   '创建加密库（选择库文件位置）',
   '设置主密码（Argon2id 派生的解锁口令）',

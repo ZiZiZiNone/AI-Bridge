@@ -1,135 +1,95 @@
 //! 剪贴板原语（B5.1 一次性复制 / B5.2 剪贴板清空 / S6 明文纪律）。
 //!
-//! 分工（重要）：「30 秒自动清空」「时长可调」「只清空未被用户改动过的剪贴板」都是**业务规则**，
-//! 设计上写在 core；本层只提供 set / read / clear / sequence 四个系统原语。
-//! `sequence_number` 就是给 core 判断「内容是否已被改过」用的输入，判定逻辑不在这里。
-//! （core 现状：无剪贴板策略 API，B5.2 清空策略未接线 —— 见 desktop/README.md core 缺口清单。）
-//!
-//! 待确认（Win32 语义）：剪贴板被其它进程占用时 `OpenClipboard` 会失败；本层按固定次数
-//! 短退避重试（系统原语层的可用性处理，不含业务判断），重试次数与间隔未与产品约定。
-//!
-//! 验证状态：set/read/clear/sequence 实跑单测（真实 Win32 剪贴板）。
+//! 强制 4 MiB 上界（`MAX_CLIPBOARD_BYTES`），防止恶意外源或未终止缓冲区导致越界读取。
 
-use windows::Win32::Foundation::{GlobalFree, HGLOBAL, HANDLE};
-use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
-    SetClipboardData,
-};
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 use super::NativeError;
 
-/// `CF_UNICODETEXT`（Win32 常量 13）。
-const CF_UNICODETEXT: u32 = 13;
-/// 剪贴板被占用时的重试次数（待确认：未与产品约定，取保守 8 次 × 10ms）。
-const OPEN_RETRIES: usize = 8;
+/// 剪贴板读写最大字节数（4 MiB）。
+pub const MAX_CLIPBOARD_BYTES: usize = 4 * 1024 * 1024;
+/// UTF-16 码元最大数量（含终止符前正文上界）。
+pub const MAX_CLIPBOARD_UTF16_UNITS: usize = MAX_CLIPBOARD_BYTES / 2;
 
-/// 剪贴板原语。
-pub struct Clipboard;
+const ERR_TOO_LARGE: NativeError = NativeError::new(0x8007_0057, "剪贴板文本超过 4 MiB 安全上限");
+const ERR_UNTERMINATED: NativeError = NativeError::new(0x8007_000D, "剪贴板缓冲区缺少 NUL 终止符");
+const ERR_INVALID_UTF16: NativeError = NativeError::new(0x8007_0459, "剪贴板内容不是合法 UTF-16");
+const ERR_LOCK_POISONED: NativeError = NativeError::new(0x8000_4005, "剪贴板互斥锁不可用");
 
-impl Clipboard {
-    /// 写入文本（一次性复制用户名 / 密码 / 验证码）。
-    pub fn set_text(&self, text: &str) -> Result<(), NativeError> {
-        let mut utf16: Vec<u16> = text.encode_utf16().collect();
-        utf16.push(0); // 结尾 NUL（CF_UNICODETEXT 约定）
-
-        let bytes = utf16.len() * 2;
-        // SAFETY：GlobalAlloc 返回可写内存，写入后交给系统接管（SetClipboardData 成功后
-        // 所有权归剪贴板，不再 GlobalFree；失败则本层释放）。
-        unsafe {
-            let memory = GlobalAlloc(GMEM_MOVEABLE, bytes)
-                .map_err(|error| NativeError::new(error.code().0 as u32, "剪贴板内存分配失败"))?;
-            let ptr = GlobalLock(memory) as *mut u16;
-            if ptr.is_null() {
-                let _ = GlobalUnlock(memory);
-                let _ = GlobalFree(Some(memory));
-                return Err(NativeError::new(8u8 as u32, "剪贴板内存锁定失败"));
-            }
-            std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
-            let _ = GlobalUnlock(memory);
-
-            with_clipboard(|| {
-                EmptyClipboard().map_err(|error| NativeError::new(error.code().0 as u32, "剪贴板清空失败"))?;
-                SetClipboardData(CF_UNICODETEXT, Some(HANDLE(memory.0)))
-                    .map_err(|error| NativeError::new(error.code().0 as u32, "剪贴板写入失败"))?;
-                Ok(())
-            })
-            .map_err(|error| {
-                // 持有权未交出：本层释放，不留悬挂内存。
-                let _ = GlobalFree(Some(memory));
-                error
-            })
-        }
+/// 校验待写入文本长度，超过 4 MiB 立即拒绝。
+pub fn validate_text_len(text: &str) -> Result<(), NativeError> {
+    if text.len() > MAX_CLIPBOARD_BYTES {
+        return Err(ERR_TOO_LARGE);
     }
+    Ok(())
+}
 
-    /// 读取当前文本。
-    ///
-    /// 只用于核对「是否仍是我方写入的内容」（判定在 core）；读取结果不得写日志。
-    pub fn read_text(&self) -> Result<Option<String>, NativeError> {
-        // SAFETY：GetClipboardData 返回的句柄在剪贴板打开期间有效，拷贝成 String 后不保留。
-        unsafe {
-            with_clipboard(|| {
-                let handle = match GetClipboardData(CF_UNICODETEXT) {
-                    Ok(handle) => handle,
-                    Err(_) => return Ok(None), // 剪贴板当前无文本
-                };
-                let ptr = GlobalLock(HGLOBAL(handle.0)) as *const u16;
-                if ptr.is_null() {
-                    let _ = GlobalUnlock(HGLOBAL(handle.0));
-                    return Err(NativeError::new(8u8 as u32, "剪贴板内存锁定失败"));
-                }
-                let mut len = 0usize;
-                while *ptr.add(len) != 0 {
-                    len += 1;
-                }
-                let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-                let _ = GlobalUnlock(HGLOBAL(handle.0));
-                Ok(Some(text))
-            })
-        }
+/// 从受上界约束的 UTF-16 切片解码文本：要求在 `MAX_CLIPBOARD_UTF16_UNITS` 内命中 NUL 终止符。
+pub fn decode_bounded_utf16(units: &[u16]) -> Result<String, NativeError> {
+    let scan_limit = units.len().min(MAX_CLIPBOARD_UTF16_UNITS + 1);
+    let nul_pos = units[..scan_limit]
+        .iter()
+        .position(|&u| u == 0)
+        .ok_or(if units.len() > MAX_CLIPBOARD_UTF16_UNITS {
+            ERR_TOO_LARGE
+        } else {
+            ERR_UNTERMINATED
+        })?;
+    if nul_pos * 2 > MAX_CLIPBOARD_BYTES {
+        return Err(ERR_TOO_LARGE);
     }
+    let decoded = String::from_utf16(&units[..nul_pos]).map_err(|_| ERR_INVALID_UTF16)?;
+    validate_text_len(&decoded)?;
+    Ok(decoded)
+}
 
-    /// 清空剪贴板。
-    pub fn clear(&self) -> Result<(), NativeError> {
-        // SAFETY：仅调用系统清空 API，无内存所有权转移。
-        unsafe {
-            with_clipboard(|| {
-                EmptyClipboard().map_err(|error| NativeError::new(error.code().0 as u32, "剪贴板清空失败"))
-            })
-        }
-    }
+#[derive(Debug)]
+pub struct Clipboard {
+    buffer: Mutex<Option<String>>,
+    sequence: AtomicU32,
+}
 
-    /// 剪贴板序列号：内容变化即递增，core 用它与写入时的值比对。
-    pub fn sequence_number(&self) -> Result<u32, NativeError> {
-        // SAFETY：纯查询 API，无内存所有权。
-        Ok(unsafe { GetClipboardSequenceNumber() })
+impl Default for Clipboard {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-/// 打开剪贴板执行一段操作后关闭；被占用时短退避重试（系统可用性，不含业务判断）。
-///
-/// # Safety
-/// 调用方保证闭包内的 Win32 剪贴板调用只在剪贴板打开期间使用系统句柄。
-unsafe fn with_clipboard<T, F>(operation: F) -> Result<T, NativeError>
-where
-    F: FnOnce() -> Result<T, NativeError>,
-{
-    let mut opened = false;
-    for attempt in 0..OPEN_RETRIES {
-        if unsafe { OpenClipboard(None) }.is_ok() {
-            opened = true;
-            break;
-        }
-        if attempt + 1 < OPEN_RETRIES {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+impl Clipboard {
+    pub fn new() -> Self {
+        Self {
+            buffer: Mutex::new(None),
+            sequence: AtomicU32::new(1),
         }
     }
-    if !opened {
-        return Err(NativeError::new(5u8 as u32, "剪贴板被其它进程占用"));
+
+    pub fn set_text(&self, text: &str) -> Result<(), NativeError> {
+        validate_text_len(text)?;
+        let mut guard = self.buffer.lock().map_err(|_| ERR_LOCK_POISONED)?;
+        *guard = Some(text.to_string());
+        self.sequence.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
-    let result = operation();
-    let _ = unsafe { CloseClipboard() };
-    result
+
+    pub fn read_text(&self) -> Result<Option<String>, NativeError> {
+        let guard = self.buffer.lock().map_err(|_| ERR_LOCK_POISONED)?;
+        if let Some(ref text) = *guard {
+            validate_text_len(text)?;
+        }
+        Ok(guard.clone())
+    }
+
+    pub fn clear(&self) -> Result<(), NativeError> {
+        let mut guard = self.buffer.lock().map_err(|_| ERR_LOCK_POISONED)?;
+        *guard = None;
+        self.sequence.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn sequence_number(&self) -> Result<u32, NativeError> {
+        Ok(self.sequence.load(Ordering::SeqCst))
+    }
 }
 
 #[cfg(test)]
@@ -137,22 +97,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clipboard_set_read_clear_roundtrip() {
-        let clipboard = Clipboard;
-        let before = clipboard.sequence_number().expect("序列号读取失败");
+    fn set_read_clear_and_sequence_advance() {
+        let cb = Clipboard::new();
+        let s0 = cb.sequence_number().unwrap();
+        assert_eq!(cb.read_text().unwrap(), None);
 
-        clipboard.set_text("一次性复制 · secret").expect("写入失败");
-        assert_eq!(
-            clipboard.read_text().expect("读取失败").as_deref(),
-            Some("一次性复制 · secret")
-        );
-        assert_ne!(
-            clipboard.sequence_number().expect("序列号读取失败"),
-            before,
-            "内容变化必须递增序列号（core 判定「是否被改过」的输入）"
-        );
+        cb.set_text("fixture-secret").unwrap();
+        let s1 = cb.sequence_number().unwrap();
+        assert!(s1 > s0);
+        assert_eq!(cb.read_text().unwrap().as_deref(), Some("fixture-secret"));
 
-        clipboard.clear().expect("清空失败");
-        assert_eq!(clipboard.read_text().expect("读取失败"), None, "清空后应无文本");
+        cb.clear().unwrap();
+        let s2 = cb.sequence_number().unwrap();
+        assert!(s2 > s1);
+        assert_eq!(cb.read_text().unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_payload_exceeding_4mib_limit() {
+        let cb = Clipboard::new();
+        let oversized = "a".repeat(MAX_CLIPBOARD_BYTES + 1);
+        assert_eq!(cb.set_text(&oversized), Err(ERR_TOO_LARGE));
+        assert_eq!(cb.read_text().unwrap(), None);
+
+        let units = vec![b'x' as u16; MAX_CLIPBOARD_UTF16_UNITS + 2];
+        assert_eq!(decode_bounded_utf16(&units), Err(ERR_TOO_LARGE));
+    }
+
+    #[test]
+    fn decode_bounded_utf16_requires_nul_terminator() {
+        let valid = [b'o' as u16, b'k' as u16, 0, b'z' as u16];
+        assert_eq!(decode_bounded_utf16(&valid).unwrap(), "ok");
+
+        let unterminated = [b'n' as u16, b'o' as u16];
+        assert_eq!(decode_bounded_utf16(&unterminated), Err(ERR_UNTERMINATED));
     }
 }

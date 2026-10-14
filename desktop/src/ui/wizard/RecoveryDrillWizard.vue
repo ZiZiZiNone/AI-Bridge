@@ -1,9 +1,6 @@
 <template>
   <WindowShell title="恢复演练" no="W14">
     <div class="view">
-      <p class="view__hint">
-        一次性窗口（用完即焚）。A6.8：在沙盒中恢复备份并比对条目数与完整性，不改动现有库。
-      </p>
       <ol class="steps">
         <li v-for="(step, index) in steps" :key="step" :class="{ 'steps__item--active': index === stepIndex }">
           {{ step }}
@@ -14,7 +11,7 @@
         <button v-if="!isLast" type="button" class="view__action" @click="next">下一步</button>
         <button v-else type="button" class="view__action" @click="destroy">完成</button>
       </div>
-      <p class="view__empty">演练结果（条目数 / 完整性）将在 core 返回后显示</p>
+      <p class="view__empty">在沙盒中恢复备份并比对条目数与完整性，不改动现有库</p>
     </div>
   </WindowShell>
 </template>
@@ -24,10 +21,6 @@ import { computed, ref } from 'vue';
 import WindowShell from '../components/WindowShell.vue';
 import { useWindowControls } from '../../hooks/useWindowControls';
 
-/**
- * W14 恢复演练向导（一次性窗口）。
- * 承载：A6.8 沙盒恢复与比对。解密与比对在 core；沙盒本身不落明文（S6）。
- */
 const steps: readonly string[] = ['选择要演练的备份', '沙盒解密恢复', '比对条目数与完整性'];
 
 const stepIndex = ref(0);

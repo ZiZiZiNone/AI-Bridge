@@ -1,12 +1,6 @@
 <template>
   <WindowShell title="临时会话" no="W5">
     <div class="view">
-      <p class="view__hint">
-        C1–C5 临时会话。含新建会话表单屏（域名白名单、只读 / 单次、TTL）。
-        真实会话由 core（ab-broker）代持，AI 端只见临时凭证；本视图只呈现信封元数据，
-        不接触也不落任何明文（S6 明文纪律）。
-      </p>
-
       <StateBlock
         :state="props.state"
         :error-message="props.errorMessage"
@@ -19,7 +13,9 @@
               <th>账号</th>
               <th>目标</th>
               <th>来源</th>
+              <th>权限模式</th>
               <th>到期</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -27,14 +23,26 @@
               <td>{{ row.account_ref }}</td>
               <td>{{ row.target.domain ?? row.target.app_id ?? '—' }}</td>
               <td>{{ row.source.type }}</td>
+              <td>{{ row.scope?.read_only === false ? '读写' : '只读 / 写操作挂起审批' }}</td>
               <td>{{ row.expires_at ?? '—' }}</td>
+              <td>
+                <button
+                  type="button"
+                  class="view__inline-action"
+                  @click="emit('revoke', row.account_ref)"
+                >
+                  立即收回
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
       </StateBlock>
 
-      <button type="button" class="view__action">新建会话</button>
-      <button type="button" class="view__action">一键吊销全部</button>
+      <div class="view__toolbar">
+        <button type="button" class="view__action" @click="emit('issue')">新建会话</button>
+        <button type="button" class="view__action" @click="emit('revoke-all')">一键吊销全部</button>
+      </div>
     </div>
   </WindowShell>
 </template>
@@ -45,10 +53,6 @@ import WindowShell from '../components/WindowShell.vue';
 import type { SessionEnvelope } from '../../types/contract';
 import type { UIState } from '../../types/ui';
 
-/**
- * W5 临时会话面板（弹出面板）。
- * 受控视图：TTL / scope / 吊销等业务规则在 core（ab-broker），UI 只呈现与转发意图。
- */
 interface Props {
   envelopes?: SessionEnvelope[];
   state?: UIState;
@@ -63,6 +67,9 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   retry: [];
+  issue: [];
+  revoke: [accountRef: string];
+  'revoke-all': [];
 }>();
 </script>
 
@@ -80,8 +87,13 @@ const emit = defineEmits<{
   text-align: left;
 }
 
-.view__action {
-  margin: 10px 8px 0 0;
+.view__toolbar {
+  margin-top: 10px;
+}
+
+.view__action,
+.view__inline-action {
+  margin-right: 8px;
   padding: 4px 12px;
   border: 1px solid var(--ab-border);
   border-radius: 6px;

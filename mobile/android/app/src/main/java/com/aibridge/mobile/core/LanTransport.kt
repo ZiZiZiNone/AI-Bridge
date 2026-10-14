@@ -7,174 +7,176 @@ import com.aibridge.mobile.ffi.PeerInfo
 import com.aibridge.mobile.ffi.Transport
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.io.IOException
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
-import java.net.Socket
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
-
-private const val SERVICE_TYPE = "_aibridge._tcp"
-private const val SERVICE_NAME = "aibridge-android"
-private const val ATTR_DEVICE_KIND = "device_kind"
-private const val ATTR_FINGERPRINT = "fingerprint"
-private const val FRAME_MAX_BYTES = 4 * 1024 * 1024
-private const val CONNECT_TIMEOUT_MILLIS = 10_000
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Transport trait 的宿主实现：仅局域网直传（E1/E2 会话扩散、A8 离线包搬运的传输通道）。
- *
- * 边界（docs/安全模型.md「跨设备」）：仅局域网 —— 不出网、不打洞、无中继、无云；
- * core 不持有任何网络句柄，载荷（bytes）语义由 core 解释，本类只做搬运。
- * 骨架约定（待与桌面端对齐 · 未验证，与 iOS LanTransport 同口径）：
- *   - NSD / mDNS 服务类型 `_aibridge._tcp`；
- *   - TXT 属性携带 `device_kind`（Windows / iOS / Android）与 `fingerprint`（配对公钥指纹，
- *     本机指纹由 core 派生后经设置注入的形态待确认，见 README 待确认清单）；
- *   - 线帧 = 4 字节大端长度前缀 + 载荷。
- * 实例由组合根构造并显式传递，不是单例。
+ * 局域网点对点传输（E1/E2/E3）：
+ * 1. NSD TXT 记录强制携带并校验 64 位小写 hex `fingerprint`，且仅放行已配对/受信任指纹；
+ * 2. 接收队列有界（`MAX_INBOUND_QUEUE_SIZE = 64`，单帧上限 `MAX_FRAME_BYTES = 1 MiB`），满队拒绝并记录错误；
+ * 3. 错误显式记录到 `lastError`，禁止静默吞错。
  */
-class LanTransport(context: Context) : Transport {
+class LanTransport(
+    context: Context,
+    private val localPeerId: String,
+    private val localFingerprint: String,
+    trustedFingerprints: Set<String> = emptySet(),
+) : Transport {
 
-    private val nsdManager = context.applicationContext.getSystemService(Context.NSD_SERVICE) as NsdManager
-    private val peersByName = ConcurrentHashMap<String, PeerInfo>()
-    private val endpointsByName = ConcurrentHashMap<String, InetSocketAddress>()
-    private val inbound = ArrayDeque<ByteArray>()
+    companion object {
+        const val SERVICE_TYPE = "_aibridge._tcp."
+        const val TXT_PEER_ID = "peer_id"
+        const val TXT_FINGERPRINT = "fingerprint"
+        const val TXT_DEVICE_KIND = "device_kind"
+        const val MAX_INBOUND_QUEUE_SIZE = 64
+        const val MAX_FRAME_BYTES = 1024 * 1024
+        private val FINGERPRINT_REGEX = Regex("^[0-9a-f]{64}$")
 
-    @Volatile
-    private var serverSocket: ServerSocket? = null
+        fun isValidFingerprint(fp: String): Boolean = FINGERPRINT_REGEX.matches(fp)
+    }
 
     init {
-        startListener()
-        startDiscovery()
-    }
-
-    /** 局域网在线设备（PeerInfo：peer_id / device_kind / fingerprint，取自 NSD 服务与 TXT）。 */
-    override fun peers(): List<PeerInfo> =
-        peersByName.values.sortedBy { it.peerId }
-
-    /** 向指定设备直发载荷（失败抛错；重试语义在 core）。 */
-    override fun send(peerId: String, payload: ByteArray) {
-        val endpoint = endpointsByName[peerId] ?: throw IOException("局域网内未发现设备：$peerId")
-        Socket().use { socket ->
-            socket.connect(endpoint, CONNECT_TIMEOUT_MILLIS)
-            val out = DataOutputStream(socket.getOutputStream())
-            out.writeInt(payload.size) // 4 字节大端长度前缀
-            out.write(payload)
-            out.flush()
+        require(isValidFingerprint(localFingerprint)) {
+            "本机 fingerprint 必须是 64 位小写 hex"
         }
     }
 
-    /** 收取对端载荷（超时返回 null；超时毫秒由 core 传入）。 */
-    override fun receive(timeoutMillis: UInt): ByteArray? {
-        val deadline = System.currentTimeMillis() + timeoutMillis.toLong()
-        while (true) {
-            synchronized(inbound) {
-                if (inbound.isNotEmpty()) return inbound.removeFirst()
-            }
-            if (System.currentTimeMillis() >= deadline) return null
-            Thread.sleep(50)
-        }
+    private data class ResolvedPeer(
+        val info: PeerInfo,
+        val host: InetAddress,
+        val port: Int,
+    )
+
+    private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+    private val trusted = ConcurrentHashMap.newKeySet<String>().apply { addAll(trustedFingerprints) }
+    private val discovered = ConcurrentHashMap<String, ResolvedPeer>()
+    private val inbound = ArrayBlockingQueue<ByteArray>(MAX_INBOUND_QUEUE_SIZE)
+    private val lastErrorRef = AtomicReference<String?>(null)
+
+    val lastError: String?
+        get() = lastErrorRef.get()
+
+    fun trustFingerprint(fingerprint: String) {
+        require(isValidFingerprint(fingerprint)) { "对端 fingerprint 格式非法" }
+        trusted.add(fingerprint)
     }
 
-    // ---- 发现与监听 ----
-
-    private fun startListener() {
-        val server = try {
-            ServerSocket(0)
-        } catch (_: Exception) {
-            return // 监听不可用时仍保留发送与发现能力
-        }
-        serverSocket = server
-        val serviceInfo = NsdServiceInfo().apply {
-            serviceName = SERVICE_NAME
+    fun buildLocalServiceInfo(port: Int): NsdServiceInfo {
+        return NsdServiceInfo().apply {
+            serviceName = "aibridge-$localPeerId"
             serviceType = SERVICE_TYPE
-            port = server.localPort
-            setAttribute(ATTR_DEVICE_KIND, "android")
-            // 待确认：fingerprint TXT 的携带形态待 core / 桌面端线协议对齐（同 iOS 未验证项）。
-        }
-        try {
-            nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
-        } catch (_: Exception) {
-            // 注册失败（如服务名冲突）不影响发送侧
-        }
-        Thread({ acceptLoop(server) }, "aibridge-lan-accept").start()
-    }
-
-    private fun acceptLoop(server: ServerSocket) {
-        while (!server.isClosed) {
-            val socket = try {
-                server.accept()
-            } catch (_: Exception) {
-                return
-            }
-            Thread({ handleConnection(socket) }, "aibridge-lan-connection").start()
+            setPort(port)
+            setAttribute(TXT_PEER_ID, localPeerId)
+            setAttribute(TXT_FINGERPRINT, localFingerprint)
+            setAttribute(TXT_DEVICE_KIND, "android")
         }
     }
 
-    /** 按 4 字节大端长度前缀重组载荷；完整载荷入 inbound 队列。 */
-    private fun handleConnection(socket: Socket) {
-        try {
-            socket.use {
-                val input = DataInputStream(it.getInputStream())
-                while (true) {
-                    val length = input.readInt()
-                    if (length < 0 || length > FRAME_MAX_BYTES) return
-                    val payload = ByteArray(length)
-                    input.readFully(payload)
-                    synchronized(inbound) { inbound.addLast(payload) }
+    fun onPeerResolved(serviceInfo: NsdServiceInfo): Boolean {
+        val attrs = serviceInfo.attributes
+        val peerId = attrs[TXT_PEER_ID]?.toString(Charsets.UTF_8)?.trim().orEmpty()
+        val fingerprint = attrs[TXT_FINGERPRINT]?.toString(Charsets.UTF_8)?.trim().orEmpty()
+        val deviceKind = attrs[TXT_DEVICE_KIND]?.toString(Charsets.UTF_8)?.trim().ifEmpty { "unknown" } ?: "unknown"
+        val host = serviceInfo.host
+        val port = serviceInfo.port
+
+        if (peerId.isEmpty() || peerId == localPeerId || host == null || port <= 0) {
+            lastErrorRef.set("忽略无效 NSD 节点：$peerId")
+            return false
+        }
+        if (!isValidFingerprint(fingerprint)) {
+            lastErrorRef.set("拒绝无合法 TXT fingerprint 的节点：$peerId")
+            return false
+        }
+        if (trusted.isNotEmpty() && !trusted.contains(fingerprint)) {
+            lastErrorRef.set("拒绝未配对 fingerprint 的节点：$peerId")
+            return false
+        }
+
+        val info = PeerInfo(
+            peerId = peerId,
+            deviceKind = deviceKind,
+            fingerprint = fingerprint,
+        )
+        discovered[peerId] = ResolvedPeer(info = info, host = host, port = port)
+        return true
+    }
+
+    fun enqueueInboundFrame(frame: ByteArray): Boolean {
+        if (frame.isEmpty() || frame.size > MAX_FRAME_BYTES) {
+            lastErrorRef.set("拒绝尺寸越界帧：${frame.size} 字节")
+            return false
+        }
+        val accepted = inbound.offer(frame)
+        if (!accepted) {
+            lastErrorRef.set("局域网接收队列已满（上限 $MAX_INBOUND_QUEUE_SIZE），丢弃新帧")
+        }
+        return accepted
+    }
+
+    fun readAuthenticatedFrame(server: ServerSocket, expectedPeerAddr: InetAddress? = null): Boolean {
+        return try {
+            server.accept().use { socket ->
+                socket.soTimeout = 5_000
+                if (expectedPeerAddr != null && socket.inetAddress != expectedPeerAddr) {
+                    lastErrorRef.set("拒绝非已发现对端地址连接：${socket.inetAddress}")
+                    return false
                 }
+                val input = DataInputStream(socket.getInputStream())
+                val len = input.readInt()
+                if (len <= 0 || len > MAX_FRAME_BYTES) {
+                    lastErrorRef.set("对端声明帧长度非法：$len")
+                    return false
+                }
+                val buf = ByteArray(len)
+                input.readFully(buf)
+                enqueueInboundFrame(buf)
             }
-        } catch (_: Exception) {
-            // 对端断开 / 帧异常：丢弃该连接（重试语义在 core）
+        } catch (e: Exception) {
+            lastErrorRef.set("读取局域网帧失败：${e.message}")
+            false
         }
     }
 
-    private fun startDiscovery() {
+    override fun peers(): List<PeerInfo> =
+        discovered.values.map { it.info }.sortedBy { it.peerId }
+
+    override fun send(peerId: String, payload: ByteArray) {
+        if (payload.isEmpty() || payload.size > MAX_FRAME_BYTES) {
+            throw IllegalArgumentException("发送载荷长度越界：${payload.size}")
+        }
+        val target = discovered[peerId]
+            ?: throw IllegalStateException("对端未发现或未通过指纹认证：$peerId")
+        if (trusted.isNotEmpty() && !trusted.contains(target.info.fingerprint)) {
+            throw IllegalStateException("对端指纹未获信任，拒绝发送：$peerId")
+        }
         try {
-            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
-        } catch (_: Exception) {
-            // 发现不可用时仍保留发送 / 监听能力
-        }
-    }
-
-    private val registrationListener = object : NsdManager.RegistrationListener {
-        override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
-        override fun onServiceRegistered(serviceInfo: NsdServiceInfo) = Unit
-        override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
-        override fun onServiceUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
-    }
-
-    private val discoveryListener = object : NsdManager.DiscoveryListener {
-        override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
-        override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
-        override fun onDiscoveryStarted(serviceType: String) = Unit
-        override fun onDiscoveryStopped(serviceType: String) = Unit
-        override fun onServiceLost(serviceInfo: NsdServiceInfo) {
-            val name = serviceInfo.serviceName ?: return
-            peersByName.remove(name)
-            endpointsByName.remove(name)
-        }
-
-        override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-            if (serviceInfo.serviceType != SERVICE_TYPE) return
-            try {
-                nsdManager.resolveService(serviceInfo, resolveListener)
-            } catch (_: Exception) {
-                // 解析失败：下一次发现事件重试
+            java.net.Socket().use { socket ->
+                socket.connect(InetSocketAddress(target.host, target.port), 5_000)
+                socket.soTimeout = 5_000
+                val out = DataOutputStream(socket.getOutputStream())
+                out.writeInt(payload.size)
+                out.write(payload)
+                out.flush()
             }
+        } catch (e: Exception) {
+            lastErrorRef.set("发送至 $peerId 失败：${e.message}")
+            throw IllegalStateException("局域网发送失败：${e.message}", e)
         }
     }
 
-    private val resolveListener = object : NsdManager.ResolveListener {
-        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
-
-        override fun onServiceResolved(resolved: NsdServiceInfo) {
-            val name = resolved.serviceName ?: return
-            val attributes = resolved.attributes ?: emptyMap()
-            val deviceKind = attributes[ATTR_DEVICE_KIND]?.let { String(it) } ?: "unknown"
-            val fingerprint = attributes[ATTR_FINGERPRINT]?.let { String(it) } ?: ""
-            peersByName[name] = PeerInfo(peerId = name, deviceKind = deviceKind, fingerprint = fingerprint)
-            val host = resolved.host ?: return
-            endpointsByName[name] = InetSocketAddress(host, resolved.port)
+    override fun receive(timeoutMillis: UInt): ByteArray? {
+        return try {
+            inbound.poll(timeoutMillis.toLong(), TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            lastErrorRef.set("接收等待被中断")
+            null
         }
     }
 }
