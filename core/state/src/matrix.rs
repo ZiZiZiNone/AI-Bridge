@@ -3,7 +3,7 @@
 //! 行内**不含 payload**：清单只暴露展示所需字段（账号 / 端 / 来源 / 目标 / 到期 / 健康），
 //! 会话正文不经过 UI 层。
 
-use ab_contract::{SessionKind, Source, SourceType, Target};
+use ab_contract::{SessionKind, Source, SourceType, Target, TargetKind};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
@@ -168,6 +168,42 @@ impl<S: StateStore, C: Clock, R: SessionSource> StateService<S, C, R> {
 
         rows.sort_by(|a, b| compare_rows(&filters.sort, a, b));
         Ok(rows)
+    }
+
+    /// 按目标查会话（含 payload）：消费方为 ab-broker 代持（ab-mcp `acquire_session`）
+    /// 与宿主注入；同站多账号并存时返回全部候选，由调用方消歧。
+    pub fn sessions_for_target(&self, target: &Target) -> Result<Vec<SessionEntry>, StateError> {
+        let entries = self.store.load_sessions()?;
+        Ok(entries
+            .into_iter()
+            .filter(|entry| target_matches(&entry.record.target, target))
+            .collect())
+    }
+}
+
+/// 目标匹配：kind 相同后按对应键比对（web=domain、app=app_id；大小写与首尾点不敏感）。
+fn target_matches(stored: &Target, want: &Target) -> bool {
+    if stored.kind != want.kind {
+        return false;
+    }
+    let norm = |value: Option<&str>| -> String {
+        value
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches('.')
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+    };
+    match want.kind {
+        TargetKind::Web => {
+            let (a, b) = (norm(stored.domain.as_deref()), norm(want.domain.as_deref()));
+            !a.is_empty() && a == b
+        }
+        TargetKind::App => {
+            let (a, b) = (norm(stored.app_id.as_deref()), norm(want.app_id.as_deref()));
+            !a.is_empty() && a == b
+        }
+        TargetKind::Container => true,
     }
 }
 

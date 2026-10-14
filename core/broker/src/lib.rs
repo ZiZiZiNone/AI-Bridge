@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ab_audit::{AuditAction, AuditError, AuditEvent, AuditResult, AuditSink};
 use ab_contract::time::format_rfc3339_secs as format_rfc3339;
@@ -232,15 +232,16 @@ impl GrantRecord {
 }
 
 /// 临时会话服务：状态自持（进程内存，重启即清），审计与熵源经参数注入，无全局单例。
-pub struct BrokerService<'a> {
-    audit: &'a dyn AuditSink,
+/// 审计出口持 `Arc`：桌面 UI 与 MCP server 共享同一服务实例。
+pub struct BrokerService {
+    audit: Arc<dyn AuditSink>,
     mac_key: Zeroizing<[u8; 32]>,
     records: Mutex<BTreeMap<[u8; 32], GrantRecord>>,
 }
 
-impl<'a> BrokerService<'a> {
+impl BrokerService {
     /// `master_key` 只用于派生句柄查表键（`aibridge/v1/broker-token` 域），不落表。
-    pub fn new(audit: &'a dyn AuditSink, master_key: &[u8; 32]) -> Result<Self, BrokerError> {
+    pub fn new(audit: Arc<dyn AuditSink>, master_key: &[u8; 32]) -> Result<Self, BrokerError> {
         let mac_key = derive_domain(master_key, None, DomainLabel::BrokerToken)?;
         Ok(Self {
             audit,
@@ -849,7 +850,7 @@ mod tests {
     }
 
     fn issue_one<'a>(
-        broker: &BrokerService<'a>,
+        broker: &BrokerService,
         scope: ScopeSpec,
         ttl_secs: Option<u64>,
     ) -> TemporaryGrant {
@@ -866,8 +867,8 @@ mod tests {
 
     #[test]
     fn issue_grants_scoped_handle_and_audits_without_secrets() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let grant = issue_one(&broker, scope(&["github.com"], false, false), None);
 
         assert_eq!(grant.account_ref, "acc-1");
@@ -891,8 +892,8 @@ mod tests {
 
     #[test]
     fn issue_rejects_target_outside_scope_and_audits_denied() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let err = broker
             .issue(
                 "ai-client",
@@ -915,8 +916,8 @@ mod tests {
 
     #[test]
     fn issue_rejects_bad_ttl_empty_allowlist_and_bad_scope() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let real = web_envelope();
 
         for (scope, ttl_secs, want) in [
@@ -945,8 +946,8 @@ mod tests {
 
     #[test]
     fn authorize_enforces_domain_allowlist_including_subdomains() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let grant = issue_one(&broker, scope(&["github.com"], false, false), None);
 
         let permit = broker
@@ -979,8 +980,8 @@ mod tests {
 
     #[test]
     fn read_only_scope_blocks_writes() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let grant = issue_one(&broker, scope(&["github.com"], true, false), None);
 
         broker
@@ -1010,8 +1011,8 @@ mod tests {
 
     #[test]
     fn single_use_grant_is_consumed_after_one_authorize() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let grant = issue_one(&broker, scope(&["github.com"], false, true), None);
 
         broker
@@ -1041,8 +1042,8 @@ mod tests {
 
     #[test]
     fn sweep_releases_idle_and_ttl_expired_first_trigger_wins() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let idle_grant = issue_one(&broker, scope(&["github.com"], false, false), Some(MAX_TTL_SECS));
         let ttl_grant = issue_one(&broker, scope(&["github.com"], false, false), Some(60));
 
@@ -1074,8 +1075,8 @@ mod tests {
 
     #[test]
     fn authorize_on_expired_grant_fails_even_before_sweep() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let grant = issue_one(&broker, scope(&["github.com"], false, false), Some(60));
         let err = broker
             .authorize(
@@ -1093,8 +1094,8 @@ mod tests {
 
     #[test]
     fn renew_extends_within_absolute_cap_only() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let grant = issue_one(&broker, scope(&["github.com"], false, false), Some(60));
 
         let status = broker.renew("ai-client", &grant.session_id, Some(120), NOW + 10).unwrap();
@@ -1109,8 +1110,8 @@ mod tests {
 
     #[test]
     fn release_drops_real_copy_and_keeps_handle_dead() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let grant = issue_one(&broker, scope(&["github.com"], false, false), None);
 
         broker.release("ai-client", &grant.session_id, NOW + 5).unwrap();
@@ -1142,8 +1143,8 @@ mod tests {
 
     #[test]
     fn revoke_and_revoke_all_audit_with_vocabulary() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let a = issue_one(&broker, scope(&["github.com"], false, false), None);
         let b = issue_one(&broker, scope(&["github.com"], false, false), None);
 
@@ -1160,8 +1161,8 @@ mod tests {
 
     #[test]
     fn table_stores_only_hashed_handles() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let grant = issue_one(&broker, scope(&["github.com"], false, false), None);
 
         let handle_bytes = decode_hex(&grant.handle).unwrap();
@@ -1176,8 +1177,8 @@ mod tests {
 
     #[test]
     fn audit_failure_blocks_issue_without_leaving_state() {
-        let sink = FailSink;
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(FailSink);
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let err = broker
             .issue(
                 "ai-client",
@@ -1196,8 +1197,8 @@ mod tests {
 
     #[test]
     fn unknown_session_and_bad_handle_denied_and_audited() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
 
         assert_eq!(
             broker.release("ai-client", "nope", NOW).unwrap_err(),
@@ -1224,8 +1225,8 @@ mod tests {
 
     #[test]
     fn debug_output_never_contains_handle() {
-        let sink = InMemoryAuditSink::new();
-        let broker = BrokerService::new(&sink, &MASTER).unwrap();
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let broker = BrokerService::new(sink.clone(), &MASTER).unwrap();
         let grant = issue_one(&broker, scope(&["github.com"], false, false), None);
         let permit = broker
             .authorize(
