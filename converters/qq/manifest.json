@@ -1,0 +1,15 @@
+{
+  "id": "qq",
+  "name": "QQ",
+  "version": "0.1.0",
+  "level": "c",
+  "readable_paths": ["{APPDATA}\\Tencent\\QQ\\session-store.json"],
+  "entry": "converter.wasm",
+  "module_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "signature": {
+    "algorithm": "ed25519",
+    "signer": "aibridge-official-2026",
+    "value": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "min_app_version": "0.1.0"
+}

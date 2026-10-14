@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "app_id": "qq",
+  "level": "c",
+  "generated_at": "2026-01-15T08:30:00Z",
+  "sessions": [
+    {
+      "account_ref": "qq-fixture-10001",
+      "target": { "kind": "web", "domain": "portal.chat-service.example" },
+      "kind": "cookie",
+      "payload": {
+        "cookies": [
+          {
+            "name": "sid",
+            "value": "fixture-cookie-sid-1",
+            "domain": "portal.chat-service.example",
+            "path": "/",
+            "secure": true,
+            "http_only": true,
+            "same_site": "lax",
+            "expires_at": "2026-02-15T08:30:00Z"
+          },
+          {
+            "name": "theme",
+            "value": "fixture-cookie-theme-1",
+            "domain": ".chat-service.example",
+            "path": "/",
+            "secure": true,
+            "http_only": false,
+            "same_site": "strict"
+          }
+        ]
+      },
+      "expires_at": "2026-02-15T08:30:00Z",
+      "source": { "type": "converter", "id": "qq" }
+    },
+    {
+      "account_ref": "qq-fixture-10001",
+      "target": { "kind": "web", "domain": "portal.chat-service.example" },
+      "kind": "token",
+      "payload": { "token": "fixture-token-access-1" },
+      "expires_at": "2026-01-15T09:30:00Z",
+      "source": { "type": "converter", "id": "qq" }
+    }
+  ],
+  "meta": {
+    "converter_version": "0.1.0",
+    "collected_at": "2026-01-15T08:30:00Z",
+    "source_files": ["{APPDATA}\\Tencent\\QQ\\session-store.json"]
+  }
+}

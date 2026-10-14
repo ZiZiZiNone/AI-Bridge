@@ -1,0 +1,59 @@
+{
+  "store_version": 1,
+  "written_at": "2026-01-15T08:29:00Z",
+  "launch": {
+    "app_id": "qq",
+    "executable_hint": "fixture-qq.exe"
+  },
+  "accounts": [
+    {
+      "uin": "fixture-10001",
+      "site": "https://portal.chat-service.example",
+      "session": {
+        "token": "fixture-token-access-1",
+        "token_expires_at": "2026-01-15T09:30:00Z",
+        "cookies": [
+          {
+            "name": "sid",
+            "value": "fixture-cookie-sid-1",
+            "domain": "portal.chat-service.example",
+            "path": "/",
+            "secure": true,
+            "http_only": true,
+            "same_site": "lax",
+            "expires_at": "2026-02-15T08:30:00Z"
+          },
+          {
+            "name": "theme",
+            "value": "fixture-cookie-theme-1",
+            "domain": ".chat-service.example",
+            "path": "/",
+            "secure": true,
+            "http_only": false,
+            "same_site": "strict",
+            "expires_at": null
+          }
+        ]
+      },
+      "plain_credentials": [
+        {
+          "kind": "password",
+          "username": "demo.user@chat-service.example",
+          "secret": "fixture-password-1",
+          "url": "https://portal.chat-service.example/login"
+        },
+        {
+          "kind": "totp",
+          "username": "demo.user@chat-service.example",
+          "totp_seed": "fixture-totp-seed-1",
+          "url": "https://portal.chat-service.example"
+        },
+        {
+          "kind": "passkey",
+          "username": "demo.user@chat-service.example",
+          "url": "https://portal.chat-service.example"
+        }
+      ]
+    }
+  ]
+}

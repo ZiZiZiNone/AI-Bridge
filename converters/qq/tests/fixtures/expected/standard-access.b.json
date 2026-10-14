@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "app_id": "qq",
+  "level": "b",
+  "generated_at": "2026-01-15T08:30:00Z",
+  "credentials": [
+    {
+      "account_ref": "qq-fixture-10001",
+      "kind": "password",
+      "username": "demo.user@chat-service.example",
+      "secret": "fixture-password-1",
+      "url": "https://portal.chat-service.example/login"
+    },
+    {
+      "account_ref": "qq-fixture-10001",
+      "kind": "totp",
+      "username": "demo.user@chat-service.example",
+      "totp_seed": "fixture-totp-seed-1",
+      "url": "https://portal.chat-service.example"
+    },
+    {
+      "account_ref": "qq-fixture-10001",
+      "kind": "passkey",
+      "username": "demo.user@chat-service.example",
+      "url": "https://portal.chat-service.example"
+    }
+  ],
+  "meta": {
+    "converter_version": "0.1.0",
+    "collected_at": "2026-01-15T08:30:00Z",
+    "source_files": ["{APPDATA}\\Tencent\\QQ\\session-store.json"]
+  }
+}
