@@ -21,6 +21,7 @@ pub use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 type HmacSha1 = Hmac<Sha1>;
+type HmacSha512 = Hmac<Sha512>;
 
 /// `Display` 只输出固定文案：密钥/明文/密文材料不进错误信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +312,12 @@ pub fn sha512(data: &[u8]) -> [u8; 64] {
 
 pub fn hmac_sha1(key: &[u8], message: &[u8]) -> Result<[u8; 20], CryptoError> {
     let mut mac = HmacSha1::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength)?;
+    mac.update(message);
+    Ok(mac.finalize().into_bytes().into())
+}
+
+pub fn hmac_sha512(key: &[u8], message: &[u8]) -> Result<[u8; 64], CryptoError> {
+    let mut mac = HmacSha512::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength)?;
     mac.update(message);
     Ok(mac.finalize().into_bytes().into())
 }

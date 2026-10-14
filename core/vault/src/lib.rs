@@ -1,8 +1,13 @@
 //! 保险库：KDBX4 格式级兼容的条目存储（灾备方向：文件可被 KeePassXC 直接打开）。
 //! 存取走 `VaultStore` 注入，核心不碰文件系统；保存复用 transformed，不重跑 Argon2。
 
+mod generator;
 mod kdbx;
+mod totp;
 mod xml;
+
+pub use generator::{generate_secret, GeneratedSecret, GeneratorSpec};
+pub use totp::{totp_code, TotpAlgorithm, TotpParams};
 
 use std::fmt;
 
