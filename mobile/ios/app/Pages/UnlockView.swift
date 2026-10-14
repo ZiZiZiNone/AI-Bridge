@@ -10,7 +10,8 @@ struct UnlockView: View {
 
     @State private var masterPassword = ""
     @State private var errorMessage: String?
-    @State private var biometricAvailable = true
+    // P0-2：仅当用户显式开启 S1 快速解锁开关时才显示/保存因子（默认关）。
+    @State private var biometricAvailable = false
 
     var body: some View {
         PageScaffold(screenId: "M1", title: "锁屏 / 解锁", functionPoints: "S1") {
@@ -48,8 +49,11 @@ struct UnlockView: View {
     private func unlockWithPassword() {
         do {
             try environment.core.vault().unlock(masterPassword: masterPassword)
-            // 快速解锁因子仅在本设备 Keychain（生物门控）保存；保存失败不影响解锁。
-            try? environment.quickUnlock.save(masterPassword: masterPassword)
+            // 快速解锁因子仅在本设备 Keychain（生物门控）保存；P0-2：仅当用户
+            // 开启 S1 开关才保存，保存失败不影响解锁。
+            if environment.settings.quickUnlockEnabled {
+                try? environment.quickUnlock.save(masterPassword: masterPassword)
+            }
             masterPassword = ""
             errorMessage = nil
             onUnlock()

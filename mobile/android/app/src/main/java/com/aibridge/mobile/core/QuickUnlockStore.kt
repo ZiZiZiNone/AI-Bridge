@@ -71,6 +71,11 @@ class QuickUnlockStore(private val directory: File) {
             )
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                // 安全模型 S1：生物识别仅作解锁因子，但因子本身必须绑定用户认证——
+                // 否则设备已解锁状态下任何能触达 Keystore 别名的路径都可解出主口令
+                // （审查报告 P0-2，对齐 iOS 的 kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly）。
+                .setUserAuthenticationRequired(true)
+                .setInvalidatedByBiometricEnrollment(true)
                 .build(),
         )
         return generator.generateKey()

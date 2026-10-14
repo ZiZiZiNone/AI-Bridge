@@ -10,6 +10,7 @@ final class AppSettings {
         static let confirmBeforeFill = "settings.confirm_before_fill"
         static let scheduledBackup = "settings.scheduled_backup"
         static let systemNotifications = "settings.system_notifications"
+        static let quickUnlockEnabled = "settings.quick_unlock_enabled"
     }
 
     private let defaults: UserDefaults
@@ -43,5 +44,14 @@ final class AppSettings {
     var systemNotifications: Bool {
         get { defaults.bool(forKey: Key.systemNotifications) }
         set { defaults.set(newValue, forKey: Key.systemNotifications) }
+    }
+
+    /// 生物识别快速解锁开关（S1，默认关）。
+    ///
+    /// 审查报告 P0-2 口径：解锁成功不得无条件保存主口令因子——只有用户显式
+    /// 开启本开关后 QuickUnlockStore 才保存；关闭时调用方须同时 clear 因子。
+    var quickUnlockEnabled: Bool {
+        get { defaults.bool(forKey: Key.quickUnlockEnabled) }
+        set { defaults.set(newValue, forKey: Key.quickUnlockEnabled) }
     }
 }

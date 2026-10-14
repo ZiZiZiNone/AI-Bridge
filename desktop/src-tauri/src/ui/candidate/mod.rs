@@ -25,8 +25,17 @@ pub fn summon(app: &AppHandle, anchor: ShowAnchor) -> Result<(), String> {
 
 /// 按锚点定位候选条窗口。
 ///
-/// 骨架：位置计算依赖系统能力（GetCursorPos / UIA caret），实现期接入 `native`；
-/// 本层只负责「取到锚点坐标 → 交给窗口 API」。
-fn place(_app: &AppHandle, _anchor: ShowAnchor) -> Result<(), String> {
-    todo!("取锚点坐标（Pointer=GetCursorPos，ForegroundCaret=UIA caret）后 set_position")
+/// 实现期接入 `native`（Pointer=GetCursorPos，ForegroundCaret=UIA caret）。
+/// 骨架期 fail-closed：定位未实现前不 panic（协议入口 `aibridge://candidate` 与
+/// 托盘「快速填充」直达本函数，`todo!()` 会让持有已解锁库的宿主进程崩溃——
+/// 审查报告 P0-1）。窗口已由 `summon` 切换显示，仅定位退化为默认位置。
+fn place(_app: &AppHandle, anchor: ShowAnchor) -> Result<(), String> {
+    // 未接 native 前：Pointer 锚点可退化为屏幕中心；ForegroundCaret 无从取坐标，
+    // 显式报错而非 panic（调用方可提示用户）。
+    match anchor {
+        ShowAnchor::Pointer => Ok(()), // 退化为窗口默认位置
+        ShowAnchor::ForegroundCaret => {
+            Err("光标锚点定位未实现（待接 UIA caret），请用默认位置".to_string())
+        }
+    }
 }

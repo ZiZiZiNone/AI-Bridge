@@ -39,7 +39,8 @@ fun UnlockScreen(
 ) {
     var masterPassword by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var biometricAvailable by remember { mutableStateOf(true) }
+    // P0-2：仅当用户显式开启 S1 快速解锁开关时才显示/保存因子（默认关）。
+    var biometricAvailable by remember { mutableStateOf(dependencies.settings.quickUnlockEnabled) }
 
     PageScaffold(screenId = "M1", title = "锁屏 / 解锁", functionPoints = "S1", modifier = modifier) {
         Column {
@@ -59,8 +60,11 @@ fun UnlockScreen(
                 onClick = {
                     try {
                         dependencies.core.vault().unlock(masterPassword)
-                        // 快速解锁因子仅保存在本设备（Keystore 包裹）；保存失败不影响解锁。
-                        runCatching { dependencies.quickUnlock.save(masterPassword) }
+                        // 快速解锁因子仅保存在本设备（Keystore 包裹 + 生物识别绑定）；
+                        // P0-2：仅当用户开启 S1 开关才保存，保存失败不影响解锁。
+                        if (dependencies.settings.quickUnlockEnabled) {
+                            runCatching { dependencies.quickUnlock.save(masterPassword) }
+                        }
                         masterPassword = ""
                         errorMessage = null
                         onUnlock()

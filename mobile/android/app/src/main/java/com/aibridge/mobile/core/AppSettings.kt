@@ -6,6 +6,7 @@ private const val KEY_AUTO_LOCK_SECONDS = "settings.auto_lock_seconds"
 private const val KEY_CONFIRM_BEFORE_FILL = "settings.confirm_before_fill"
 private const val KEY_SCHEDULED_BACKUP = "settings.scheduled_backup"
 private const val KEY_SYSTEM_NOTIFICATIONS = "settings.system_notifications"
+private const val KEY_QUICK_UNLOCK = "settings.quick_unlock_enabled"
 
 /**
  * 非秘密偏好（S2 空闲锁 / S4 填充确认 / S8 系统集成 / A6.3 定时备份）。
@@ -42,5 +43,17 @@ class AppSettings(private val preferences: SharedPreferences) {
         get() = preferences.getBoolean(KEY_SYSTEM_NOTIFICATIONS, false)
         set(value) {
             preferences.edit().putBoolean(KEY_SYSTEM_NOTIFICATIONS, value).apply()
+        }
+
+    /**
+     * 生物识别快速解锁开关（S1，默认关）。
+     *
+     * 审查报告 P0-2：解锁成功不得无条件保存主口令因子——只有用户显式开启本开关后，
+     * QuickUnlockStore 才会保存；关闭时调用方须同时 `QuickUnlockStore.clear()`。
+     */
+    var quickUnlockEnabled: Boolean
+        get() = preferences.getBoolean(KEY_QUICK_UNLOCK, false)
+        set(value) {
+            preferences.edit().putBoolean(KEY_QUICK_UNLOCK, value).apply()
         }
 }

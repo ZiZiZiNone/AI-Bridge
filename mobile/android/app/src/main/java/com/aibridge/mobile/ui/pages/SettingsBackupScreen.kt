@@ -45,7 +45,8 @@ fun SettingsBackupScreen(
     var confirmBeforeFill by remember { mutableStateOf(false) }
     var scheduledBackup by remember { mutableStateOf(false) }
     var systemNotifications by remember { mutableStateOf(false) }
-    var quickUnlockEnabled by remember { mutableStateOf(true) }
+    // P0-2：默认值与持久化偏好一致（默认关），不先真后假闪跳。
+    var quickUnlockEnabled by remember { mutableStateOf(dependencies.settings.quickUnlockEnabled) }
     var syncReachable by remember { mutableStateOf(false) }
     var showAutoFill by remember { mutableStateOf(false) }
 
@@ -97,6 +98,7 @@ fun SettingsBackupScreen(
                     checked = quickUnlockEnabled,
                     onCheckedChange = {
                         quickUnlockEnabled = it
+                        dependencies.settings.quickUnlockEnabled = it
                         if (!it) dependencies.quickUnlock.clear()
                     },
                 )
@@ -160,6 +162,7 @@ fun SettingsBackupScreen(
         confirmBeforeFill = dependencies.settings.confirmBeforeFill
         scheduledBackup = dependencies.settings.scheduledBackup
         systemNotifications = dependencies.settings.systemNotifications
+        quickUnlockEnabled = dependencies.settings.quickUnlockEnabled
         syncReachable = dependencies.core.state().health().syncReachable
     }
 }
