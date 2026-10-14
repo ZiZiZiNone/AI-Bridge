@@ -1,6 +1,8 @@
 //! `ab-contract` —— 契约类型与结构校验；唯一事实源 `contracts/*.schema.json`。
 #![forbid(unsafe_code)]
 
+pub mod time;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

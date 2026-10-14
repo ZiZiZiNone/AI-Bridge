@@ -11,17 +11,14 @@
 //! 明确不做：UI、网络句柄、直接登出第三方、持久化（临时会话随进程存续，重启即清）。
 #![forbid(unsafe_code)]
 
-mod time;
-
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
 use ab_audit::{AuditAction, AuditError, AuditEvent, AuditResult, AuditSink};
+use ab_contract::time::format_rfc3339_secs as format_rfc3339;
 use ab_contract::{ContractError, ScopeSpec, SessionEnvelope, Source, Target, TargetKind};
 use ab_crypto::{derive_domain, hmac_sign, CryptoError, DomainLabel, Entropy, Zeroizing};
-
-use crate::time::format_rfc3339;
 
 const REDACTED: &str = "[REDACTED]";
 
