@@ -3,6 +3,15 @@
  *
  * 位置：桌面 `desktop/bridge/`（messaging_host / ext_protocol）与 `extensions/chromium|firefox`
  * 之间只走这一份消息定义，双方不引对方代码（契约层 ← 核心层 ← 宿主层的单向依赖）。
+ *
+ * 三条纪律：
+ * 1. 三类消息：request（扩展→宿主）/ response（宿主→扩展，与 request.id 配对）/ event（宿主→扩展，无配对）。
+ * 2. 消息体只承载契约类型（SessionEnvelope / Cookie / Target / CredentialRecord / StandardAccess），不发明业务字段。
+ * 3. 本层只做协议编解码与形状校验：参数与结果里的**业务**合法性（信封能否解码、目标是否获授权）
+ *    由方法处理器用 envelope.ts / core 规则校验。
+ *
+ * 传输层边界：native messaging 的 4 字节小端长度前缀由宿主侧 `desktop/bridge/messaging_host`
+ * 负责，扩展侧由浏览器 `runtime.connectNative` 端口负责，本文件不实现分帧。
  */
 import type {
   CredentialRecord,
@@ -30,7 +39,7 @@ export interface PushTarget {
 }
 
 /**
- * v1 方法面：
+ * v1 方法面（覆盖四条数据流里扩展参与的部分）：
  * handshake=版本/方言协商；session.capture=扩展读 cookie → 归一化上报；
  * session.inject=宿主下发信封 → 扩展注入；session.proxy_fetch=宿主借道原浏览器上下文代发请求；
  * session.query=按目标查询可用会话候选；session.fetch=拉取单条信封注入；
@@ -68,7 +77,7 @@ export interface BridgeError {
   message: string;
 }
 
-/** 方法 → 参数/结果类型。结果只回契约类型或受控响应计数。 */
+/** 方法 → 参数/结果类型。结果只回契约类型或计数，不回业务判断。 */
 export interface BridgeMethodMap {
   handshake: {
     params: { protocol_version: number; dialect: BridgeDialect; extension_id: string };
@@ -138,6 +147,7 @@ export interface BridgeEventPayloadMap {
 export interface BridgeRequestOf<M extends BridgeMethod = BridgeMethod> {
   v: typeof BRIDGE_PROTOCOL_VERSION;
   type: "request";
+  /** 请求标识，response 用它配对；同一端口内唯一。 */
   id: string;
   method: M;
   params: BridgeMethodMap[M]["params"];
@@ -149,6 +159,7 @@ export interface BridgeSuccessResponseOf<M extends BridgeMethod = BridgeMethod> 
   type: "response";
   id: string;
   ok: true;
+  /** 回显方法名，便于响应自描述。 */
   method: M;
   result: BridgeMethodMap[M]["result"];
 }
@@ -169,6 +180,7 @@ export interface BridgeEventOf<E extends BridgeEventName = BridgeEventName> {
   emitted_at?: string;
 }
 
+/** 按 method 判别：`request.method === "session.inject"` 后 params 自动收窄到该方法的形状。 */
 export type BridgeRequest = { [M in BridgeMethod]: BridgeRequestOf<M> }[BridgeMethod];
 export type BridgeSuccessResponse = { [M in BridgeMethod]: BridgeSuccessResponseOf<M> }[BridgeMethod];
 export type BridgeResponse = BridgeSuccessResponse | BridgeErrorResponse;
@@ -178,6 +190,7 @@ export type BridgeMessage = BridgeRequest | BridgeResponse | BridgeEvent;
 
 /* ---------------- 编解码 ---------------- */
 
+/** 编解码错误码：JSON/形状层（与 response 里的 BridgeErrorCode 是两套词表）。 */
 export type BridgeCodecErrorCode =
   | ShapeErrorCode
   | "invalid_json"
@@ -188,6 +201,7 @@ export type BridgeCodecErrorCode =
   | "unknown_method"
   | "unknown_event";
 
+/** 桥消息不合法：字段路径 + 错误码，供调用方按结构分支。 */
 export class BridgeProtocolError extends Error {
   code: BridgeCodecErrorCode;
   path: string;
@@ -214,6 +228,7 @@ function fail(code: BridgeCodecErrorCode, path: string, detail: string): never {
   throw new BridgeProtocolError(code, path, detail);
 }
 
+/** 按 schema 式形状检查（与 envelope.ts 共用同一实现）。 */
 function requireShape(
   value: Record<string, unknown>,
   path: string,
@@ -252,6 +267,7 @@ function requireEnum<T extends string>(value: unknown, values: readonly T[], pat
   return value as T;
 }
 
+/** 方法名单独一枚错误码：调用方按码区分"协议里没这个方法"与其他形状错误。 */
 function requireMethod(value: unknown): BridgeMethod {
   if (typeof value !== "string") {
     fail("invalid_type", "$.method", `应为 string，实为 ${typeof value}`);
@@ -262,6 +278,7 @@ function requireMethod(value: unknown): BridgeMethod {
   return value as BridgeMethod;
 }
 
+/** 事件名单独一枚错误码。 */
 function requireEventName(value: unknown): BridgeEventName {
   if (typeof value !== "string") {
     fail("invalid_type", "$.event", `应为 string，实为 ${typeof value}`);
@@ -288,6 +305,7 @@ function decodeRequest(value: Record<string, unknown>): BridgeRequest {
   const method = requireMethod(value.method);
   const params = requireObject(value.params, "$.params");
 
+  // params 的内容形状按方法由处理器校验（文件头第 3 条），此处只做协议层收窄。
   const request = {
     v: BRIDGE_PROTOCOL_VERSION,
     type: "request",
@@ -351,6 +369,10 @@ function decodeEvent(value: Record<string, unknown>): BridgeEvent {
   return message;
 }
 
+/**
+ * 解码：JSON → 版本 → 消息类别 → 该类别的形状。
+ * 非法消息抛 BridgeProtocolError，绝不返回半个对象。
+ */
 export function decodeBridgeMessage(text: string): BridgeMessage {
   let value: unknown;
   try {
@@ -368,6 +390,10 @@ export function decodeBridgeMessage(text: string): BridgeMessage {
   return decodeEvent(message);
 }
 
+/**
+ * 编码：先序列化，再用**同一个解码器**校验线上字节。
+ * 一份规则两处使用，杜绝"能编码但解不开"的消息。
+ */
 export function encodeBridgeMessage(message: BridgeMessage): string {
   const text = JSON.stringify(message);
   decodeBridgeMessage(text);

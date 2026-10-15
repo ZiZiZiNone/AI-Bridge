@@ -2,6 +2,13 @@
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+use ab_contract::ConverterManifest;
+use ab_converter::SignatureVerifier;
+use tauri::State;
+
+use crate::host::{HostSignatureVerifier, HostState};
 
 fn is_valid_converter_id(id: &str) -> bool {
     let len = id.len();
@@ -63,6 +70,30 @@ pub fn validate_converter_install_path(
     }
 
     Ok(canon_target)
+}
+
+#[tauri::command]
+pub fn converters_validate_path(
+    host: State<'_, Arc<HostState>>,
+    converter_id: String,
+    candidate_dir: String,
+) -> Result<String, String> {
+    let root = host.converters_dir();
+    let validated =
+        validate_converter_install_path(&root, &converter_id, Path::new(&candidate_dir))?;
+    Ok(validated.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn converters_verify_manifest(
+    manifest: ConverterManifest,
+    module: Vec<u8>,
+) -> Result<bool, String> {
+    let verifier = HostSignatureVerifier::from_env();
+    verifier
+        .verify(&manifest, &module)
+        .map(|()| true)
+        .map_err(|e| format!("{e:?}"))
 }
 
 #[cfg(test)]

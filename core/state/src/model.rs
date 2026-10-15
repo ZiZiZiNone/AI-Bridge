@@ -3,6 +3,7 @@
 //! 会话本体不做二次建模：一律复用契约层 `ab_contract::SessionRecord`（契约唯一
 //! 事实源），状态层只补「这份会话现在待在哪个端」这一矩阵维度。
 
+use ab_contract::time::parse_rfc3339_secs;
 use ab_contract::{SessionKind, SessionRecord, SourceType, Target, TargetKind};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -65,7 +66,7 @@ impl SessionEntry {
         }
         self.record.validate()?;
         if let Some(expires_at) = &self.record.expires_at {
-            if crate::time::parse_rfc3339_secs(expires_at).is_none() {
+            if parse_rfc3339_secs(expires_at).is_none() {
                 return Err(StateError::InvalidEntry {
                     field: "expires_at",
                     value: expires_at.clone(),
@@ -79,7 +80,7 @@ impl SessionEntry {
     pub fn expires_at_secs(&self) -> Result<Option<i64>, StateError> {
         match &self.record.expires_at {
             None => Ok(None),
-            Some(expires_at) => match crate::time::parse_rfc3339_secs(expires_at) {
+            Some(expires_at) => match parse_rfc3339_secs(expires_at) {
                 Some(secs) => Ok(Some(secs)),
                 None => Err(StateError::InvalidEntry {
                     field: "expires_at",

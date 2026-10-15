@@ -8,14 +8,16 @@
 //!   及 `InMemoryAuditSink`（追加式审计）；
 //! - 全部状态初始化与互斥锁访问走 `Result` fail-closed 传播，非测试路径零 `expect`/`unwrap`/`panic!`。
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ab_audit::{AuditAction, AuditEvent, AuditResult, AuditSink, InMemoryAuditSink};
+use ab_audit::{AuditAction, AuditEvent, AuditFilter, AuditResult, AuditSink, InMemoryAuditSink};
 use ab_broker::{
-    format_rfc3339_utc, AgentHttpExecutor, AgentHttpRequest, AgentHttpResponse, Broker,
-    BrokerConfig, BrokerError, IssuedSession, PendingWriteApproval, RevocationNotice,
+    AgentHttpExecutor, AgentHttpRequest, AgentHttpResponse, Broker, BrokerConfig, IssuedSession,
+    PendingWriteApproval, RevocationNotice,
 };
+use ab_contract::time::format_rfc3339_secs;
 use ab_contract::{
     canonical_signing_bytes, ConverterManifest, ScopeSpec, SessionEnvelope, SessionRecord, Source,
     SourceType, StandardAccess, OFFICIAL_CONVERTER_PUBKEY, OFFICIAL_SIGNER_ID, SCHEMA_VERSION,
@@ -23,7 +25,8 @@ use ab_contract::{
 use ab_converter::{SignatureVerifier, VerifyError};
 use ab_crypto::{ed25519_verify, sha256};
 use ab_state::{
-    Clock, Endpoint, EndpointKind, InMemoryStateStore, SessionEntry, StateStore, SystemClock,
+    Clock, Endpoint, EndpointKind, InMemoryStateStore, RollbackReport, SessionEntry, Snapshot,
+    SnapshotMeta, StateStore, SystemClock,
 };
 use serde_json::json;
 
@@ -43,7 +46,7 @@ pub enum HostError {
     FlowFailed(String),
 }
 
-impl std::fmt::Display for HostError {
+impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             HostError::DataDirUnavailable(msg) => write!(f, "数据目录不可用：{msg}"),
@@ -131,11 +134,11 @@ impl SignatureVerifier for HostSignatureVerifier {
         let signer = self
             .expected_signer
             .as_deref()
-            .ok_or(VerifyError::UnknownSigner)?;
-        let pubkey = self.public_key.as_ref().ok_or(VerifyError::UnknownSigner)?;
+            .ok_or(VerifyError::SignerNotAllowed)?;
+        let pubkey = self.public_key.as_ref().ok_or(VerifyError::SignerNotAllowed)?;
 
         if manifest.signature.signer != signer {
-            return Err(VerifyError::UnknownSigner);
+            return Err(VerifyError::SignerNotAllowed);
         }
 
         let actual_hash = encode_lower_hex(&sha256(module));
@@ -291,7 +294,7 @@ impl HostState {
             .validate()
             .map_err(|e| HostError::FlowFailed(e.to_string()))?;
 
-        let now_str = format_rfc3339_utc(self.clock.now_unix_secs());
+        let now_str = format_rfc3339_secs(self.clock.now_unix_secs());
         let who = match endpoint_kind {
             EndpointKind::Browser => "browser-extension",
             EndpointKind::Desktop => "desktop-app",
@@ -353,7 +356,7 @@ impl HostState {
             .validate()
             .map_err(|e| HostError::FlowFailed(e.to_string()))?;
 
-        let now_str = format_rfc3339_utc(self.clock.now_unix_secs());
+        let now_str = format_rfc3339_secs(self.clock.now_unix_secs());
         let mut entries = self
             .state_store
             .load_sessions()
@@ -472,8 +475,6 @@ impl HostState {
     }
 
     /// 【扩展借壳执行隧道 `session.proxy_fetch` 请求构造】
-    /// 在校验临时会话未到期、未触发越权熔断且符合域名/只读约束后，构造发往浏览器扩展的 `session.proxy_fetch` 帧，
-    /// 让原浏览器在自身已登录上下文内直接发起请求（100% 保留原浏览器 TLS 指纹与硬件绑定密钥，零 Cookie 搬运磨损）。
     pub fn build_browser_tunnel_fetch_request(
         &self,
         request_id: impl Into<String>,
@@ -517,6 +518,29 @@ impl HostState {
             .map_err(|e| HostError::FlowFailed(e.to_string()))
     }
 
+    pub fn list_temporary_sessions(&self) -> Result<Vec<IssuedSession>, HostError> {
+        self.broker
+            .list_sessions()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    pub fn renew_temporary_session(
+        &self,
+        session_id: &str,
+        ttl_seconds: u32,
+    ) -> Result<IssuedSession, HostError> {
+        self.require_unlocked()?;
+        self.broker
+            .renew(session_id, ttl_seconds)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    pub fn release_temporary_session(&self, session_id: &str) -> Result<(), HostError> {
+        self.broker
+            .release(session_id)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
     /// 主动收回单个临时会话。
     pub fn revoke_temporary_session(&self, session_id: &str) -> Result<(), HostError> {
         self.broker
@@ -535,6 +559,73 @@ impl HostState {
     pub fn sweep_expired_sessions(&self) -> Result<Vec<IssuedSession>, HostError> {
         self.broker
             .sweep()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    pub fn list_session_entries(&self) -> Result<Vec<SessionEntry>, HostError> {
+        self.require_unlocked()?;
+        self.state_store
+            .load_sessions()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    pub fn list_snapshots(&self) -> Result<Vec<SnapshotMeta>, HostError> {
+        self.require_unlocked()?;
+        self.state_store
+            .list_snapshots()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    pub fn create_snapshot(&self, snapshot_id: impl Into<String>) -> Result<SnapshotMeta, HostError> {
+        self.require_unlocked()?;
+        let entries = self
+            .state_store
+            .load_sessions()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+        let snap = Snapshot {
+            id: snapshot_id.into(),
+            created_at: self.clock.now_unix_secs(),
+            entries,
+        };
+        let meta = snap.meta();
+        self.state_store
+            .save_snapshot(snap)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+        Ok(meta)
+    }
+
+    pub fn rollback_snapshot(&self, snapshot_id: &str) -> Result<RollbackReport, HostError> {
+        self.require_unlocked()?;
+        let snap = self
+            .state_store
+            .load_snapshot(snapshot_id)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?
+            .ok_or_else(|| HostError::FlowFailed(format!("快照 {snapshot_id} 不存在")))?;
+        let current = self
+            .state_store
+            .load_sessions()
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+        let replaced_entries = current.len();
+        let restored_entries = snap.entries.len();
+        self.state_store
+            .replace_sessions(snap.entries)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))?;
+        Ok(RollbackReport {
+            snapshot_id: snapshot_id.to_string(),
+            restored_entries,
+            replaced_entries,
+        })
+    }
+
+    pub fn query_audit_events(&self, filter: &AuditFilter) -> Result<Vec<AuditEvent>, HostError> {
+        self.audit_sink
+            .query(filter)
+            .map_err(|e| HostError::FlowFailed(e.to_string()))
+    }
+
+    pub fn count_audit_events(&self) -> Result<usize, HostError> {
+        self.audit_sink
+            .count()
             .map_err(|e| HostError::FlowFailed(e.to_string()))
     }
 
@@ -686,10 +777,6 @@ impl HostState {
         (response, events)
     }
 
-    pub fn broker_error_is_expired(err: &BrokerError) -> bool {
-        matches!(err, BrokerError::Expired(_))
-    }
-
     pub fn export_account_envelope(&self, account_ref: &str) -> Result<SessionEnvelope, HostError> {
         self.require_unlocked()?;
         let entries = self
@@ -701,7 +788,7 @@ impl HostState {
             .find(|e| e.record.account_ref == account_ref)
             .ok_or_else(|| HostError::FlowFailed(format!("账号 {account_ref} 不存在")))?;
 
-        let issued_at = format_rfc3339_utc(self.clock.now_unix_secs());
+        let issued_at = format_rfc3339_secs(self.clock.now_unix_secs());
         Ok(SessionEnvelope {
             schema_version: SCHEMA_VERSION.to_string(),
             account_ref: entry.record.account_ref,
@@ -805,6 +892,13 @@ mod tests {
         assert_eq!(
             verifier.verify(&tampered_manifest, module),
             Err(VerifyError::BadSignature)
+        );
+
+        let mut wrong_signer = manifest;
+        wrong_signer.signature.signer = "untrusted-signer".into();
+        assert_eq!(
+            verifier.verify(&wrong_signer, module),
+            Err(VerifyError::SignerNotAllowed)
         );
     }
 

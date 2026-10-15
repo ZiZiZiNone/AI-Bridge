@@ -1,5 +1,7 @@
-//! `ab-contract` —— 契约类型、结构校验、官方信任根常量与转换器签名规范化字节；唯一事实源 `contracts/*.schema.json`。
+//! `ab-contract` —— 契约类型、结构校验、RFC 3339 时间换算、官方信任根常量与转换器签名规范化字节；唯一事实源 `contracts/*.schema.json`。
 #![forbid(unsafe_code)]
+
+pub mod time;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

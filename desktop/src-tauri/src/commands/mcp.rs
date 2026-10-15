@@ -7,10 +7,12 @@
 //! - 同时支持 MCP 原生句柄调用（`agent_execute_request`）与传统非 MCP CLI 工具影子令牌调用（`agent_execute_shadow_token`）。
 
 use std::net::{IpAddr, SocketAddr, TcpListener};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ab_broker::{AgentHttpExecutor, AgentHttpRequest, AgentHttpResponse, IssuedSession};
 use ab_contract::ScopeSpec;
+use serde::{Deserialize, Serialize};
+use tauri::State;
 
 use crate::host::HostState;
 
@@ -57,7 +59,7 @@ pub fn validate_loopback_addr(addr: SocketAddr) -> Result<SocketAddr, String> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerStatus {
     pub running: bool,
     pub bound_addr: Option<SocketAddr>,
@@ -170,6 +172,27 @@ impl McpController {
         host.revoke_temporary_session(session_id)
             .map_err(|e| e.to_string())
     }
+}
+
+#[tauri::command]
+pub fn mcp_start(
+    controller: State<'_, Arc<McpController>>,
+    addr: String,
+) -> Result<McpServerStatus, String> {
+    let parsed: SocketAddr = addr
+        .parse()
+        .map_err(|e| format!("MCP 监听地址格式非法：{e}"))?;
+    controller.bind_loopback(parsed)
+}
+
+#[tauri::command]
+pub fn mcp_stop(controller: State<'_, Arc<McpController>>) -> Result<McpServerStatus, String> {
+    controller.stop()
+}
+
+#[tauri::command]
+pub fn mcp_status(controller: State<'_, Arc<McpController>>) -> Result<McpServerStatus, String> {
+    controller.status()
 }
 
 #[cfg(test)]

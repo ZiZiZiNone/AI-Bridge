@@ -6,7 +6,8 @@
 //! 桌面 / 移动 / 单测三个宿主共用同一份实现（搬进单测不改内部代码即可工作）。
 //!
 //! 与契约的关系：会话本体复用 `ab_contract::SessionRecord`（唯一事实源），结构校验
-//! 直接调用其 `validate()`，本 crate 不重复实现契约规则。
+//! 直接调用其 `validate()`，RFC3339 时间解析直接复用 `ab_contract::time::parse_rfc3339_secs`，
+//! 本 crate 不重复实现契约规则。
 //!
 //! 明确不做：签发或续期临时会话（`ab-broker`）、加密与传输（`ab-sync`）、文件落盘
 //! （由 [`StateStore`] 实现方负责）、审计写入（`ab-audit`）、直读浏览器（只经
@@ -20,8 +21,6 @@ pub mod model;
 pub mod snapshot;
 pub mod source;
 pub mod store;
-
-mod time;
 
 #[cfg(test)]
 mod test_support;
