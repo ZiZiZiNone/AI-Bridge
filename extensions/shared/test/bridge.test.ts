@@ -17,7 +17,13 @@ import {
   decodeBridgeMessage,
   encodeBridgeMessage,
 } from "../bridge.ts";
-import type { BridgeEvent, BridgeMessage, BridgeRequest, BridgeResponse } from "../bridge.ts";
+import type {
+  BridgeEvent,
+  BridgeMessage,
+  BridgeRequest,
+  BridgeResponse,
+  PushTarget,
+} from "../bridge.ts";
 import { decodeEnvelope } from "../envelope.ts";
 import type { Cookie, SessionEnvelope } from "../types.ts";
 import { SCHEMA_VERSION } from "../types.ts";
@@ -53,7 +59,7 @@ function captureRequest(): BridgeRequest {
     type: "request",
     id: "req-1",
     method: "session.capture",
-    params: { envelope: cookieEnvelope() },
+    params: { envelope: cookieEnvelope(), destination: "desktop" },
     sent_at: "2026-10-09T00:00:00Z",
   };
 }
@@ -62,7 +68,6 @@ function hasCode(code: string): (error: unknown) => boolean {
   return (error: unknown) => error instanceof BridgeProtocolError && error.code === code;
 }
 
-/** 取出合法请求 JSON，按需改坏后返回解码动作。 */
 function decodeOf(change: (message: Record<string, unknown>) => void): () => BridgeMessage {
   const raw = JSON.parse(encodeBridgeMessage(captureRequest())) as Record<string, unknown>;
   change(raw);
@@ -88,6 +93,9 @@ test("v1 词表固定：版本 / 消息类别 / 方法 / 事件 / 错误码 / �
     "session.capture",
     "session.inject",
     "session.proxy_fetch",
+    "session.query",
+    "session.fetch",
+    "push.targets",
     "credential.fill",
     "ping",
   ]);
@@ -106,6 +114,7 @@ test("request 往返：method 判别后 params 自动收窄", () => {
   assert.equal(decoded.sent_at, "2026-10-09T00:00:00Z");
   if (decoded.method !== "session.capture") assert.fail("应为 session.capture");
   assert.deepEqual(decoded.params.envelope, cookieEnvelope());
+  assert.equal(decoded.params.destination, "desktop");
 });
 
 test("response 成功往返：id 配对 + 回显 method + 结果计数", () => {
@@ -167,7 +176,7 @@ test("event 往返：broker.revoked 载荷", () => {
   assert.equal(decoded.emitted_at, "2026-10-09T00:00:01Z");
 });
 
-test("session.inject 与 session.proxy_fetch：协议层与契约层职责分离", () => {
+test("session.inject / session.proxy_fetch / session.query / session.fetch / push.targets 往返", () => {
   const envelope = cookieEnvelope();
   const request: BridgeRequest = {
     v: BRIDGE_PROTOCOL_VERSION,
@@ -195,6 +204,44 @@ test("session.inject 与 session.proxy_fetch：协议层与契约层职责分离
     },
   };
   assert.deepEqual(decodeBridgeMessage(encodeBridgeMessage(proxyFetch)), proxyFetch);
+
+  const queryReq: BridgeRequest = {
+    v: BRIDGE_PROTOCOL_VERSION,
+    type: "request",
+    id: "req-query-1",
+    method: "session.query",
+    params: { target: { kind: "web", domain: "github.com" } },
+  };
+  assert.deepEqual(decodeBridgeMessage(encodeBridgeMessage(queryReq)), queryReq);
+
+  const fetchReq: BridgeRequest = {
+    v: BRIDGE_PROTOCOL_VERSION,
+    type: "request",
+    id: "req-fetch-1",
+    method: "session.fetch",
+    params: { account_ref: "acc-1", target: { kind: "web", domain: "github.com" } },
+  };
+  assert.deepEqual(decodeBridgeMessage(encodeBridgeMessage(fetchReq)), fetchReq);
+
+  const targetsReq: BridgeRequest = {
+    v: BRIDGE_PROTOCOL_VERSION,
+    type: "request",
+    id: "req-targets-1",
+    method: "push.targets",
+    params: {},
+  };
+  assert.deepEqual(decodeBridgeMessage(encodeBridgeMessage(targetsReq)), targetsReq);
+
+  const targetItem: PushTarget = { id: "firefox", label: "Firefox" };
+  const targetsResp: BridgeResponse = {
+    v: BRIDGE_PROTOCOL_VERSION,
+    type: "response",
+    id: "req-targets-1",
+    ok: true,
+    method: "push.targets",
+    result: { targets: [targetItem] },
+  };
+  assert.deepEqual(decodeBridgeMessage(encodeBridgeMessage(targetsResp)), targetsResp);
 });
 
 test("解码拒绝：版本 / 类别 / 方法 / id / 额外字段 / 参数形状", () => {
@@ -264,7 +311,7 @@ test("四种方法的最小往返：handshake / credential.fill / ping", () => {
     type: "request",
     id: "req-c",
     method: "credential.fill",
-    params: { target: { kind: "app", app_id: "qq" } },
+    params: { target: { kind: "app", app_id: "qq" }, account_ref: "acc-1" },
   };
   const ping: BridgeRequest = {
     v: BRIDGE_PROTOCOL_VERSION,

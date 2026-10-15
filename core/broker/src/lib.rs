@@ -1,22 +1,4 @@
 //! `ab-broker` —— 跨端登录态流转、Scheme A 零明文代理、影子令牌网关、写操作挂起审批与越权自动熔断（B4 / C5 / E4 / S1）。
-//!
-//! 核心机制：
-//! 1. **任意端来源汇聚**：支持从桌面应用（转换器 `StandardAccess`）、浏览器扩展（`session.capture`）、移动端 App（容器/同步）读取已入库登录态；
-//! 2. **Scheme A（句柄代持 + 宿主代发请求，零明文出境）**：
-//!    AI Agent 仅持有 `IssuedSession { session_id, shadow_token, expires_at, scope, ... }`，绝不接触原始 Cookie / Token 明文；
-//!    宿主在内部代填 `Cookie` / `Authorization` 头并自动剥离响应中的 `Set-Cookie` 等敏感头；
-//! 3. **影子凭证网关（Shadow Token `ab_tmp_...`）**：
-//!    兼容不支持 MCP 的传统 CLI / Agent 工具（仅支持配置 `OPENAI_API_KEY` / `GITHUB_TOKEN` 与 `BASE_URL`），
-//!    通过 [`Broker::execute_shadow_token_request`] 将 `Bearer ab_tmp_...` 在本地环回网关内透明换取真实登录态代发，到点即废；
-//! 4. **越权自动熔断器（Anomaly Circuit Breaker）**：
-//!    同一临时会话累计触发 `max_violations_before_revoke`（默认 3 次）域名越权、协议违规或只读越权时，
-//!    无需等待设定时间，当场自动熔断吊销（[`RevokeReason::CircuitBroken`]）并擦除内存敏感载荷；
-//! 5. **写操作硬件级 U 盾挂起审批（Human-in-the-Loop Action Gate）**：
-//!    开启 `ask_on_write` 的会话在遇到 `POST/PUT/PATCH/DELETE` 时自动生成 [`PendingWriteApproval`] 挂起请求，
-//!    由用户在桌面或配对手机上点击「放行单次」「放行 5 分钟」或「拒绝并吊销」；
-//! 6. **向浏览器 / 移动 App 容器流转双保险收回**：
-//!    自动将所有 Cookie 的 `expires_at` 夹紧至 `min(原到期时间, 租约到期时间)`，并在收回时产出携带
-//!    `target_domain`、`cookie_names` 与 `clear_storage: true` 的 [`RevocationNotice`]。
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -31,13 +13,9 @@ use ab_contract::{
 use ab_state::{Clock, StateError, StateStore};
 use serde::{Deserialize, Serialize};
 
-/// 单次签发允许的最大 TTL（24 小时）。
 pub const MAX_TTL_SECS: u32 = 86_400;
-/// 默认空闲超时（30 分钟无访问自动收回）。
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u32 = 1_800;
-/// 默认连续越权熔断阈值（3 次违规立即自动吊销）。
 pub const DEFAULT_MAX_VIOLATIONS_BEFORE_REVOKE: u32 = 3;
-/// 写操作挂起审批默认有效期（60 秒）。
 pub const WRITE_APPROVAL_TTL_SECS: i64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,11 +35,9 @@ impl Default for BrokerConfig {
     }
 }
 
-/// 对外暴露的临时会话句柄元数据（零敏感 payload，可直接返回给 AI Agent、CLI 工具或 UI）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssuedSession {
     pub session_id: String,
-    /// 供不支持 MCP 的传统 CLI / Agent 工具使用的影子令牌（`ab_tmp_...`），到设定时间或熔断后立即作废。
     pub shadow_token: String,
     pub account_ref: String,
     pub issued_at: String,
@@ -76,7 +52,6 @@ pub struct IssuedSession {
     pub revoked_at: Option<String>,
 }
 
-/// 写操作挂起审批单（Human-in-the-Loop Action Gate）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingWriteApproval {
     pub approval_id: String,
@@ -89,7 +64,6 @@ pub struct PendingWriteApproval {
     pub expires_at_secs: i64,
 }
 
-/// 会话收回通知：供宿主桥接层转换为 `broker.revoked` 事件下发给浏览器扩展或 App 容器以清退 Cookie 与 `localStorage`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationNotice {
     pub session_id: String,
@@ -116,7 +90,6 @@ pub enum RevokeReason {
     WriteDeniedByUser,
 }
 
-/// AI Agent 发起的受控 HTTP 请求（不含凭据，由 Broker 在内部代填）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHttpRequest {
     pub method: String,
@@ -127,7 +100,6 @@ pub struct AgentHttpRequest {
     pub body: Vec<u8>,
 }
 
-/// 经 Broker 剥离 `Set-Cookie` 等敏感响应头后返回给 AI Agent 的安全响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHttpResponse {
     pub status: u16,
@@ -135,7 +107,6 @@ pub struct AgentHttpResponse {
     pub body: Vec<u8>,
 }
 
-/// 宿主注入的受控 HTTP 执行器（可由本机 HTTP 客户端或浏览器扩展 `session.proxy_fetch` 借壳隧道实现）。
 pub trait AgentHttpExecutor: Send + Sync {
     fn execute(&self, authenticated_request: &AgentHttpRequest) -> Result<AgentHttpResponse, String>;
 }
@@ -237,7 +208,6 @@ struct ManagedSession {
     cookie_names: Vec<String>,
     single_write_approved: bool,
     write_grant_until_secs: Option<i64>,
-    /// 代持的受控会话信封；一旦到期、熔断或收回立即清零 `payload`。
     envelope: Option<SessionEnvelope>,
 }
 
@@ -295,7 +265,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         }
     }
 
-    /// 签发带设定时间（`ttl_seconds`）与授权范围的临时会话句柄（默认不启用写操作挂起审批，直接按 `scope.read_only` 执行）。
     pub fn issue(
         &self,
         account_ref: &str,
@@ -305,7 +274,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         self.issue_with_write_gate(account_ref, scope, ttl_seconds, false)
     }
 
-    /// 签发临时会话句柄并显式指定是否启用「写操作硬件级 U 盾挂起审批（`ask_on_write`）」。
     pub fn issue_with_write_gate(
         &self,
         account_ref: &str,
@@ -335,7 +303,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         let issued_at = format_rfc3339_utc(now_secs);
         let expires_at = format_rfc3339_utc(expires_secs);
 
-        // 将所有 Cookie 的 expires_at 夹紧至不晚于临时会话设定收回时间
         let mut clamped_payload = source_entry.record.payload.clone();
         for cookie in &mut clamped_payload.cookies {
             cookie.expires_at = Some(match &cookie.expires_at {
@@ -425,7 +392,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         Ok(meta)
     }
 
-    /// 【影子凭证网关】供不支持 MCP 的传统 CLI / Agent 工具凭 `ab_tmp_...`（或 `Bearer ab_tmp_...`）执行受控代理请求。
     pub fn execute_shadow_token_request(
         &self,
         shadow_token_or_bearer: &str,
@@ -455,10 +421,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         self.execute_agent_request(&session_id, request, executor)
     }
 
-    /// 【Scheme A：AI Agent 零明文受控代发请求】
-    /// AI Agent 仅传 `session_id` 与不含凭据的 `AgentHttpRequest`；
-    /// Broker 校验未到期、未触发越权熔断、域名在白名单内、符合只读或写审批约束后，
-    /// 在内部代填 `Cookie` / `Authorization` 头交由 `executor` 执行，并剥离响应中的 `Set-Cookie` 等敏感头后返回。
     pub fn execute_agent_request(
         &self,
         session_id: &str,
@@ -475,8 +437,12 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         let method_upper = request.method.trim().to_ascii_uppercase();
         let is_write = !matches!(method_upper.as_str(), "GET" | "HEAD" | "OPTIONS");
 
-        let envelope =
-            self.authorize_and_lease_internal(session_id, &host, is_write, Some((&method_upper, &request.url)))?;
+        let envelope = self.authorize_and_lease_internal(
+            session_id,
+            &host,
+            is_write,
+            Some((&method_upper, &request.url)),
+        )?;
 
         let mut authed_req = request;
         authed_req.method = method_upper;
@@ -521,7 +487,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         Ok(response)
     }
 
-    /// 【受控跨端流转租约】供宿主内浏览器扩展桥（`session.inject`）或移动/桌面受控容器获取已夹紧到期时间的信封。
     pub fn lease_envelope_for_surface(
         &self,
         session_id: &str,
@@ -578,13 +543,22 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         }
 
         if is_write {
-            let managed = guard.sessions.get_mut(session_id).unwrap();
-            let has_active_grant = managed.single_write_approved
-                || managed
-                    .write_grant_until_secs
-                    .is_some_and(|until| now_secs < until);
+            let (ask_on_write, read_only, has_active_grant, single_approved, account_ref) = {
+                let managed = guard.sessions.get(session_id).unwrap();
+                let has_grant = managed.single_write_approved
+                    || managed
+                        .write_grant_until_secs
+                        .is_some_and(|until| now_secs < until);
+                (
+                    managed.meta.ask_on_write,
+                    managed.meta.scope.read_only,
+                    has_grant,
+                    managed.single_write_approved,
+                    managed.meta.account_ref.clone(),
+                )
+            };
 
-            if managed.meta.ask_on_write && !has_active_grant {
+            if ask_on_write && !has_active_grant {
                 let seq = guard.next_seq;
                 guard.next_seq += 1;
                 let approval_id = format!("appr-{now_secs}-{seq}");
@@ -592,7 +566,7 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
                 let pending = PendingWriteApproval {
                     approval_id: approval_id.clone(),
                     session_id: session_id.to_string(),
-                    account_ref: managed.meta.account_ref.clone(),
+                    account_ref,
                     method: method.to_string(),
                     url: url.to_string(),
                     domain: requested_domain.to_string(),
@@ -603,7 +577,7 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
                 return Err(BrokerError::WriteApprovalRequired(pending));
             }
 
-            if managed.meta.scope.read_only && !has_active_grant {
+            if read_only && !has_active_grant {
                 drop(guard);
                 self.record_violation_or_trip_circuit(
                     session_id,
@@ -613,40 +587,49 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
                 return Err(BrokerError::ReadOnlyViolation(session_id.to_string()));
             }
 
-            if managed.single_write_approved {
-                managed.single_write_approved = false;
+            if single_approved {
+                if let Some(managed) = guard.sessions.get_mut(session_id) {
+                    managed.single_write_approved = false;
+                }
             }
         }
 
-        let managed = guard.sessions.get_mut(session_id).unwrap();
-        let envelope = managed
-            .envelope
-            .clone()
-            .ok_or_else(|| BrokerError::Revoked(session_id.to_string()))?;
-        managed.meta.last_active_secs = now_secs;
+        let (envelope, single_use_notice) = {
+            let managed = guard.sessions.get_mut(session_id).unwrap();
+            let envelope = managed
+                .envelope
+                .clone()
+                .ok_or_else(|| BrokerError::Revoked(session_id.to_string()))?;
+            managed.meta.last_active_secs = now_secs;
 
-        if managed.meta.scope.single_use {
-            let mut event = AuditEvent::new(
-                "ab-broker",
-                now_str.clone(),
-                AuditAction::Release,
-                AuditResult::Ok,
-            );
-            event.account_ref = Some(managed.meta.account_ref.clone());
-            event.domain = Some(requested_domain.to_string());
-            event
-                .detail
-                .insert("session_id".into(), session_id.to_string());
-            event
-                .detail
-                .insert("reason".into(), "single_use_consumed".into());
-            self.audit.record_or_fail(event)?;
+            let notice = if managed.meta.scope.single_use {
+                let mut event = AuditEvent::new(
+                    "ab-broker",
+                    now_str.clone(),
+                    AuditAction::Release,
+                    AuditResult::Ok,
+                );
+                event.account_ref = Some(managed.meta.account_ref.clone());
+                event.domain = Some(requested_domain.to_string());
+                event
+                    .detail
+                    .insert("session_id".into(), session_id.to_string());
+                event
+                    .detail
+                    .insert("reason".into(), "single_use_consumed".into());
+                self.audit.record_or_fail(event)?;
 
-            managed.meta.revoked = true;
-            managed.meta.revoked_at = Some(now_str.clone());
-            managed.wipe_secret_payload();
-            let notice =
-                managed.build_revocation_notice(now_str, RevokeReason::SingleUseConsumed);
+                managed.meta.revoked = true;
+                managed.meta.revoked_at = Some(now_str.clone());
+                managed.wipe_secret_payload();
+                Some(managed.build_revocation_notice(now_str, RevokeReason::SingleUseConsumed))
+            } else {
+                None
+            };
+            (envelope, notice)
+        };
+
+        if let Some(notice) = single_use_notice {
             guard.pending_revocations.push(notice);
         }
 
@@ -662,41 +645,50 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         let now_secs = self.clock.now_unix_secs();
         let now_str = format_rfc3339_utc(now_secs);
         let mut guard = self.inner.lock().map_err(|_| BrokerError::LockPoisoned)?;
-        let Some(managed) = guard.sessions.get_mut(session_id) else {
-            return Ok(());
+
+        let tripped = {
+            let Some(managed) = guard.sessions.get_mut(session_id) else {
+                return Ok(());
+            };
+            if managed.meta.revoked {
+                return Ok(());
+            }
+
+            managed.meta.violation_count = managed.meta.violation_count.saturating_add(1);
+            let violations = managed.meta.violation_count;
+
+            let mut denied_event = AuditEvent::new(
+                "ab-broker",
+                now_str.clone(),
+                AuditAction::Revoke,
+                AuditResult::Denied,
+            );
+            denied_event.account_ref = Some(managed.meta.account_ref.clone());
+            denied_event.domain = domain.map(ToString::to_string);
+            denied_event
+                .detail
+                .insert("session_id".into(), session_id.to_string());
+            denied_event
+                .detail
+                .insert("violation".into(), kind.to_string());
+            denied_event
+                .detail
+                .insert("violation_count".into(), violations.to_string());
+            self.audit.record_or_fail(denied_event)?;
+
+            if violations >= self.config.max_violations_before_revoke {
+                managed.meta.revoked = true;
+                managed.meta.revoked_at = Some(now_str.clone());
+                managed.wipe_secret_payload();
+                let notice =
+                    managed.build_revocation_notice(now_str, RevokeReason::CircuitBroken);
+                Some((notice, violations))
+            } else {
+                None
+            }
         };
-        if managed.meta.revoked {
-            return Ok(());
-        }
 
-        managed.meta.violation_count = managed.meta.violation_count.saturating_add(1);
-        let violations = managed.meta.violation_count;
-
-        let mut denied_event = AuditEvent::new(
-            "ab-broker",
-            now_str.clone(),
-            AuditAction::Revoke,
-            AuditResult::Denied,
-        );
-        denied_event.account_ref = Some(managed.meta.account_ref.clone());
-        denied_event.domain = domain.map(ToString::to_string);
-        denied_event
-            .detail
-            .insert("session_id".into(), session_id.to_string());
-        denied_event
-            .detail
-            .insert("violation".into(), kind.to_string());
-        denied_event
-            .detail
-            .insert("violation_count".into(), violations.to_string());
-        self.audit.record_or_fail(denied_event)?;
-
-        if violations >= self.config.max_violations_before_revoke {
-            managed.meta.revoked = true;
-            managed.meta.revoked_at = Some(now_str.clone());
-            managed.wipe_secret_payload();
-            let notice =
-                managed.build_revocation_notice(now_str, RevokeReason::CircuitBroken);
+        if let Some((notice, violations)) = tripped {
             guard.pending_revocations.push(notice);
             return Err(BrokerError::CircuitBroken {
                 session_id: session_id.to_string(),
@@ -706,7 +698,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         Ok(())
     }
 
-    /// 【U 盾写操作审批放行】用户确认放行挂起的写操作（`grant_window_secs = None` 为仅放行单次，`Some(300)` 为放行 5 分钟窗口）。
     pub fn approve_write(
         &self,
         approval_id: &str,
@@ -742,7 +733,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         Ok(pending)
     }
 
-    /// 【U 盾写操作拒绝并立即收回会话】用户拒绝挂起的写操作，当场吊销该临时会话并广播 `broker.revoked`。
     pub fn deny_write_and_revoke(&self, approval_id: &str) -> Result<RevocationNotice, BrokerError> {
         let now_str = format_rfc3339_utc(self.clock.now_unix_secs());
         let mut guard = self.inner.lock().map_err(|_| BrokerError::LockPoisoned)?;
@@ -751,31 +741,34 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
             .remove(approval_id)
             .ok_or_else(|| BrokerError::ApprovalNotFound(approval_id.to_string()))?;
 
-        let managed = guard
-            .sessions
-            .get_mut(&pending.session_id)
-            .ok_or_else(|| BrokerError::SessionNotFound(pending.session_id.clone()))?;
+        let notice = {
+            let managed = guard
+                .sessions
+                .get_mut(&pending.session_id)
+                .ok_or_else(|| BrokerError::SessionNotFound(pending.session_id.clone()))?;
 
-        let mut event = AuditEvent::new(
-            "ab-broker",
-            now_str.clone(),
-            AuditAction::Revoke,
-            AuditResult::Denied,
-        );
-        event.account_ref = Some(managed.meta.account_ref.clone());
-        event.domain = Some(pending.domain.clone());
-        event
-            .detail
-            .insert("session_id".into(), pending.session_id.clone());
-        event
-            .detail
-            .insert("reason".into(), "write_denied_by_user".into());
-        self.audit.record_or_fail(event)?;
+            let mut event = AuditEvent::new(
+                "ab-broker",
+                now_str.clone(),
+                AuditAction::Revoke,
+                AuditResult::Denied,
+            );
+            event.account_ref = Some(managed.meta.account_ref.clone());
+            event.domain = Some(pending.domain.clone());
+            event
+                .detail
+                .insert("session_id".into(), pending.session_id.clone());
+            event
+                .detail
+                .insert("reason".into(), "write_denied_by_user".into());
+            self.audit.record_or_fail(event)?;
 
-        managed.meta.revoked = true;
-        managed.meta.revoked_at = Some(now_str.clone());
-        managed.wipe_secret_payload();
-        let notice = managed.build_revocation_notice(now_str, RevokeReason::WriteDeniedByUser);
+            managed.meta.revoked = true;
+            managed.meta.revoked_at = Some(now_str.clone());
+            managed.wipe_secret_payload();
+            managed.build_revocation_notice(now_str, RevokeReason::WriteDeniedByUser)
+        };
+
         guard.pending_revocations.push(notice.clone());
         Ok(notice)
     }
@@ -789,7 +782,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         Ok(guard.pending_approvals.values().cloned().collect())
     }
 
-    /// 续期未到期且未收回的临时会话。
     pub fn renew(&self, session_id: &str, ttl_seconds: u32) -> Result<IssuedSession, BrokerError> {
         let _ = self.sweep()?;
         if ttl_seconds == 0 || ttl_seconds > self.config.max_ttl_secs {
@@ -822,12 +814,10 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         Ok(managed.meta.clone())
     }
 
-    /// 主动释放临时会话（用完即放）。
     pub fn release(&self, session_id: &str) -> Result<(), BrokerError> {
         self.terminate_one(session_id, AuditAction::Release, RevokeReason::Released)
     }
 
-    /// 强制吊销单个临时会话并触发跨端撤销通知。
     pub fn revoke(&self, session_id: &str) -> Result<(), BrokerError> {
         self.terminate_one(session_id, AuditAction::Revoke, RevokeReason::ExplicitRevoke)
     }
@@ -840,34 +830,42 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
     ) -> Result<(), BrokerError> {
         let now_str = format_rfc3339_utc(self.clock.now_unix_secs());
         let mut guard = self.inner.lock().map_err(|_| BrokerError::LockPoisoned)?;
-        let managed = guard
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| BrokerError::SessionNotFound(session_id.to_string()))?;
+        let notice = {
+            let managed = guard
+                .sessions
+                .get_mut(session_id)
+                .ok_or_else(|| BrokerError::SessionNotFound(session_id.to_string()))?;
 
-        if !managed.meta.revoked {
-            let mut event = AuditEvent::new("ab-broker", now_str.clone(), action, AuditResult::Ok);
-            event.account_ref = Some(managed.meta.account_ref.clone());
-            event
-                .detail
-                .insert("session_id".into(), session_id.to_string());
-            self.audit.record_or_fail(event)?;
+            if !managed.meta.revoked {
+                let mut event =
+                    AuditEvent::new("ab-broker", now_str.clone(), action, AuditResult::Ok);
+                event.account_ref = Some(managed.meta.account_ref.clone());
+                event
+                    .detail
+                    .insert("session_id".into(), session_id.to_string());
+                self.audit.record_or_fail(event)?;
 
-            managed.meta.revoked = true;
-            managed.meta.revoked_at = Some(now_str.clone());
-            managed.wipe_secret_payload();
-            let notice = managed.build_revocation_notice(now_str, reason);
-            guard.pending_revocations.push(notice);
+                managed.meta.revoked = true;
+                managed.meta.revoked_at = Some(now_str.clone());
+                managed.wipe_secret_payload();
+                Some(managed.build_revocation_notice(now_str, reason))
+            } else {
+                None
+            }
+        };
+
+        if let Some(n) = notice {
+            guard.pending_revocations.push(n);
         }
         Ok(())
     }
 
-    /// 一键吊销全部活跃临时会话。
     pub fn revoke_all(&self) -> Result<Vec<IssuedSession>, BrokerError> {
         let now_str = format_rfc3339_utc(self.clock.now_unix_secs());
         let mut guard = self.inner.lock().map_err(|_| BrokerError::LockPoisoned)?;
         guard.pending_approvals.clear();
         let mut revoked_list = Vec::new();
+        let mut notices = Vec::new();
 
         for (session_id, managed) in guard.sessions.iter_mut() {
             if !managed.meta.revoked {
@@ -887,15 +885,15 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
                 managed.meta.revoked_at = Some(now_str.clone());
                 managed.wipe_secret_payload();
                 revoked_list.push(managed.meta.clone());
-                let notice =
-                    managed.build_revocation_notice(now_str.clone(), RevokeReason::RevokeAll);
-                guard.pending_revocations.push(notice);
+                notices.push(
+                    managed.build_revocation_notice(now_str.clone(), RevokeReason::RevokeAll),
+                );
             }
         }
+        guard.pending_revocations.extend(notices);
         Ok(revoked_list)
     }
 
-    /// 扫描并自动收回所有已达设定时间（`now >= expires_at`）或超过空闲超时的临时会话。
     pub fn sweep(&self) -> Result<Vec<IssuedSession>, BrokerError> {
         let now_secs = self.clock.now_unix_secs();
         let now_str = format_rfc3339_utc(now_secs);
@@ -906,13 +904,15 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
             .pending_approvals
             .retain(|_, p| now_secs < p.expires_at_secs);
         let mut swept = Vec::new();
+        let mut notices = Vec::new();
 
         for (session_id, managed) in guard.sessions.iter_mut() {
             if managed.meta.revoked {
                 continue;
             }
             let ttl_expired = now_secs >= managed.meta.expires_at_secs;
-            let idle_expired = now_secs.saturating_sub(managed.meta.last_active_secs) >= idle_limit;
+            let idle_expired =
+                now_secs.saturating_sub(managed.meta.last_active_secs) >= idle_limit;
 
             if ttl_expired || idle_expired {
                 let reason = if ttl_expired {
@@ -936,10 +936,10 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
                 managed.meta.revoked_at = Some(now_str.clone());
                 managed.wipe_secret_payload();
                 swept.push(managed.meta.clone());
-                let notice = managed.build_revocation_notice(now_str.clone(), reason);
-                guard.pending_revocations.push(notice);
+                notices.push(managed.build_revocation_notice(now_str.clone(), reason));
             }
         }
+        guard.pending_revocations.extend(notices);
         Ok(swept)
     }
 
@@ -949,7 +949,6 @@ impl<S: StateStore, C: Clock, A: AuditSink> Broker<S, C, A> {
         Ok(guard.sessions.values().map(|m| m.meta.clone()).collect())
     }
 
-    /// 取出待广播的收回通知（供宿主桥向浏览器扩展发送 `broker.revoked` 事件或通知移动端容器清理）。
     pub fn drain_revocations(&self) -> Result<Vec<RevocationNotice>, BrokerError> {
         let mut guard = self.inner.lock().map_err(|_| BrokerError::LockPoisoned)?;
         Ok(std::mem::take(&mut guard.pending_revocations))
@@ -1015,7 +1014,6 @@ fn domain_allowed(allowlist: &[String], requested: &str) -> bool {
     })
 }
 
-/// 将 Unix 纪元秒格式化为 `YYYY-MM-DDTHH:MM:SSZ`（UTC）。
 pub fn format_rfc3339_utc(unix_secs: i64) -> String {
     let days = unix_secs.div_euclid(86_400);
     let secs_of_day = unix_secs.rem_euclid(86_400);
@@ -1138,7 +1136,6 @@ mod tests {
             .unwrap();
         assert!(issued.shadow_token.starts_with("ab_tmp_"));
 
-        // 通过 Shadow Token（兼容非 MCP 传统 CLI/Agent）发起请求
         let resp = broker
             .execute_shadow_token_request(
                 &format!("Bearer {}", issued.shadow_token),
@@ -1154,7 +1151,6 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert!(!resp.headers.contains_key("Set-Cookie"));
 
-        // 到达设定时间（+60 秒），Shadow Token 与 session_id 同步失效
         now.store(1_791_504_060, Ordering::SeqCst);
         assert_eq!(
             broker.execute_shadow_token_request(
@@ -1193,7 +1189,6 @@ mod tests {
             )
             .unwrap();
 
-        // 前两次越权返回 DomainNotAllowed，第 3 次触发熔断器（CircuitBroken）当场收回会话
         assert!(matches!(
             broker.lease_envelope_for_surface(&issued.session_id, "evil1.example", false),
             Err(BrokerError::DomainNotAllowed { .. })
@@ -1210,7 +1205,6 @@ mod tests {
             })
         );
 
-        // 熔断后即便访问合法域名也已被收回
         assert!(matches!(
             broker.lease_envelope_for_surface(&issued.session_id, "github.com", false),
             Err(BrokerError::Revoked(_))
@@ -1243,7 +1237,6 @@ mod tests {
             )
             .unwrap();
 
-        // 发起 POST 写操作时被挂起，返回 PendingWriteApproval
         let write_req = AgentHttpRequest {
             method: "POST".into(),
             url: "https://api.github.com/repos/a/b/issues".into(),
@@ -1258,13 +1251,11 @@ mod tests {
             other => panic!("期望 WriteApprovalRequired，得到 {other:?}"),
         };
 
-        // 用户点击「放行单次」后，本次 POST 成功执行，随后自动恢复挂起保护
         broker.approve_write(&pending.approval_id, None).unwrap();
         assert!(broker
             .execute_agent_request(&issued.session_id, write_req.clone(), &MockHttpExecutor)
             .is_ok());
 
-        // 再次发起 POST 又会挂起；若用户选择「拒绝并吊销」，会话当场作废
         let err2 = broker
             .execute_agent_request(&issued.session_id, write_req, &MockHttpExecutor)
             .unwrap_err();

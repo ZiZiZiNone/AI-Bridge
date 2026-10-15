@@ -3,14 +3,13 @@
  *
  * 位置：桌面 `desktop/bridge/`（messaging_host / ext_protocol）与 `extensions/chromium|firefox`
  * 之间只走这一份消息定义，双方不引对方代码（契约层 ← 核心层 ← 宿主层的单向依赖）。
- *
- * 三条纪律：
- * 1. 三类消息：request（扩展→宿主 或 宿主→扩展借壳请求）/ response（与 request.id 配对）/ event（宿主→扩展，无配对）。
- * 2. 消息体只承载契约类型（SessionEnvelope / Cookie / Target / CredentialRecord）或受控隧道载荷，不发明冗余字段。
- * 3. 本层只做协议编解码与形状校验：参数与结果里的业务合法性（信封能否解码、目标是否获授权、TTL 是否到期）
- *    由方法处理器用 envelope.ts / core 规则校验。
  */
-import type { CredentialRecord, SessionEnvelope, Target } from "./types.ts";
+import type {
+  CredentialRecord,
+  SessionEnvelope,
+  StandardAccess,
+  Target,
+} from "./types.ts";
 import type { ShapeErrorCode } from "./envelope.ts";
 import { checkShape, isPlainObject } from "./envelope.ts";
 
@@ -24,17 +23,27 @@ export type BridgeMessageType = (typeof BRIDGE_MESSAGE_TYPES)[number];
 export const BRIDGE_DIALECTS = ["chromium", "firefox"] as const;
 export type BridgeDialect = (typeof BRIDGE_DIALECTS)[number];
 
+/** B2 推送目标描述（`push.targets` 返回项）。 */
+export interface PushTarget {
+  id: string;
+  label: string;
+}
+
 /**
  * v1 方法面：
  * handshake=版本/方言协商；session.capture=扩展读 cookie → 归一化上报；
- * session.inject=宿主下发信封 → 扩展注入；session.proxy_fetch=宿主借道原浏览器上下文代发请求（免搬运 Cookie 免疫 TLS/DBSC 风控）；
- * credential.fill=取候选填表；ping=存活探测。
+ * session.inject=宿主下发信封 → 扩展注入；session.proxy_fetch=宿主借道原浏览器上下文代发请求；
+ * session.query=按目标查询可用会话候选；session.fetch=拉取单条信封注入；
+ * push.targets=查询可推送目标端列表；credential.fill=取候选填表；ping=存活探测。
  */
 export const BRIDGE_METHODS = [
   "handshake",
   "session.capture",
   "session.inject",
   "session.proxy_fetch",
+  "session.query",
+  "session.fetch",
+  "push.targets",
   "credential.fill",
   "ping",
 ] as const;
@@ -66,7 +75,7 @@ export interface BridgeMethodMap {
     result: { protocol_version: number; host_version: string };
   };
   "session.capture": {
-    params: { envelope: SessionEnvelope };
+    params: { envelope: SessionEnvelope; destination?: string | undefined };
     result: { stored: boolean };
   };
   "session.inject": {
@@ -79,8 +88,8 @@ export interface BridgeMethodMap {
       account_ref: string;
       url: string;
       method: string;
-      headers?: Record<string, string>;
-      body?: string;
+      headers?: Record<string, string> | undefined;
+      body?: string | undefined;
     };
     result: {
       status: number;
@@ -88,8 +97,20 @@ export interface BridgeMethodMap {
       body: string;
     };
   };
-  "credential.fill": {
+  "session.query": {
     params: { target: Target };
+    result: { access: StandardAccess };
+  };
+  "session.fetch": {
+    params: { account_ref: string; target: Target };
+    result: { envelope: SessionEnvelope };
+  };
+  "push.targets": {
+    params: Record<string, never>;
+    result: { targets: PushTarget[] };
+  };
+  "credential.fill": {
+    params: { target: Target; account_ref?: string | undefined };
     result: { credentials: CredentialRecord[] };
   };
   ping: {
@@ -104,10 +125,10 @@ export interface BridgeEventPayloadMap {
   "broker.revoked": {
     account_ref: string;
     revoked_at: string;
-    session_id?: string;
-    domain?: string;
-    cookie_names?: string[];
-    clear_storage?: boolean;
+    session_id?: string | undefined;
+    domain?: string | undefined;
+    cookie_names?: string[] | undefined;
+    clear_storage?: boolean | undefined;
   };
   "host.disconnected": { reason: string };
 }
@@ -117,7 +138,6 @@ export interface BridgeEventPayloadMap {
 export interface BridgeRequestOf<M extends BridgeMethod = BridgeMethod> {
   v: typeof BRIDGE_PROTOCOL_VERSION;
   type: "request";
-  /** 请求标识，response 用它配对；同一端口内唯一。 */
   id: string;
   method: M;
   params: BridgeMethodMap[M]["params"];
@@ -129,7 +149,6 @@ export interface BridgeSuccessResponseOf<M extends BridgeMethod = BridgeMethod> 
   type: "response";
   id: string;
   ok: true;
-  /** 回显方法名，便于响应自描述。 */
   method: M;
   result: BridgeMethodMap[M]["result"];
 }
@@ -150,7 +169,6 @@ export interface BridgeEventOf<E extends BridgeEventName = BridgeEventName> {
   emitted_at?: string;
 }
 
-/** 按 method 判别：`request.method === "session.inject"` 后 params 自动收窄到该方法的形状。 */
 export type BridgeRequest = { [M in BridgeMethod]: BridgeRequestOf<M> }[BridgeMethod];
 export type BridgeSuccessResponse = { [M in BridgeMethod]: BridgeSuccessResponseOf<M> }[BridgeMethod];
 export type BridgeResponse = BridgeSuccessResponse | BridgeErrorResponse;
