@@ -4,6 +4,10 @@
       <h1 class="view__title">通知 toast</h1>
       <span class="view__no">W15</span>
     </header>
+    <p class="view__hint">
+      由系统通知承载（Windows 通知中心），不占窗口。本视图固定三组文案骨架，
+      触发时机与会话/备份规则在 core，UI 不判断。
+    </p>
     <ul class="toast">
       <li v-for="item in templates" :key="item.id" class="toast__item">
         <strong class="toast__group">{{ item.group }}</strong>
@@ -14,6 +18,10 @@
 </template>
 
 <script setup lang="ts">
+/**
+ * W15 通知 toast（非 Tauri 窗口；仅文案骨架）。
+ * 承载：A3.1 会话到期提醒、A6 备份结果、C 释放/吊销事件。
+ */
 interface ToastTemplate {
   id: string;
   group: string;

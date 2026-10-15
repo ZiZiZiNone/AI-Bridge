@@ -13,7 +13,7 @@
 use std::io;
 use std::sync::Arc;
 
-use ab_broker::{BrokerError, BrokerService, GrantStatus, IssueRequest};
+use ab_broker::{BrokerError, SessionBroker, SessionStatus, SessionIssue};
 use ab_contract::time::format_rfc3339_secs;
 use ab_contract::{ScopeSpec, SessionEnvelope, Target, TargetKind, SCHEMA_VERSION};
 use ab_crypto::Entropy;
@@ -234,16 +234,16 @@ pub struct ReleaseResult {
     pub released: bool,
 }
 
-fn state_str(state: ab_broker::GrantState) -> &'static str {
+fn state_str(state: ab_broker::SessionState) -> &'static str {
     match state {
-        ab_broker::GrantState::Active => "active",
-        ab_broker::GrantState::Released => "released",
-        ab_broker::GrantState::Revoked => "revoked",
-        ab_broker::GrantState::Consumed => "consumed",
+        ab_broker::SessionState::Active => "active",
+        ab_broker::SessionState::Released => "released",
+        ab_broker::SessionState::Revoked => "revoked",
+        ab_broker::SessionState::Consumed => "consumed",
     }
 }
 
-fn summary(status: &GrantStatus) -> SessionSummary {
+fn summary(status: &SessionStatus) -> SessionSummary {
     SessionSummary {
         session_id: status.session_id.clone(),
         account_ref: status.account_ref.clone(),
@@ -308,7 +308,7 @@ fn pick_session(
 
 /// MCP 服务：依赖全部注入（broker / 会话查询 / 时钟 / 熵源 + 调用方身份），无全局单例。
 pub struct McpService {
-    broker: Arc<BrokerService>,
+    broker: Arc<SessionBroker>,
     sessions: Arc<dyn SessionLookup>,
     clock: Arc<dyn Clock>,
     entropy: Arc<dyn Entropy>,
@@ -318,7 +318,7 @@ pub struct McpService {
 
 impl McpService {
     pub fn new(
-        broker: Arc<BrokerService>,
+        broker: Arc<SessionBroker>,
         sessions: Arc<dyn SessionLookup>,
         clock: Arc<dyn Clock>,
         entropy: Arc<dyn Entropy>,
@@ -343,7 +343,7 @@ impl McpService {
         let grant = self.broker.issue(
             &self.who,
             &envelope,
-            IssueRequest {
+            SessionIssue {
                 scope: params.scope.to_contract(),
                 ttl_secs: params.ttl_secs,
             },
@@ -553,7 +553,7 @@ mod tests {
 
     fn fixture(entries: Vec<SessionEntry>, at: i64) -> Fixture {
         let audit = Arc::new(InMemoryAuditSink::new());
-        let broker = Arc::new(BrokerService::new(audit.clone(), &MASTER).unwrap());
+        let broker = Arc::new(SessionBroker::new(audit.clone(), &MASTER).unwrap());
         let store = InMemoryStateStore::new();
         store.replace_sessions(entries).unwrap();
         let state = StateService::new(

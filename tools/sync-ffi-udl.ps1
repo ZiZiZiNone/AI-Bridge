@@ -1,40 +1,27 @@
+# tools/sync-ffi-udl.ps1 -- keep the UDL single source of truth (mobile/ffi/aibridge.udl)
+#
+# The uniffi-bindgen CLI `generate` subcommand requires the UDL to live under
+# `<crate>/src/` to locate the crate root (guess_crate_root), so
+# core/ffi/src/aibridge.udl holds a build copy. This script syncs source ->
+# copy; use -Check to verify consistency only (for CI / verify-all).
+
 param(
     [switch]$Check
 )
 
-$ErrorActionPreference = "Stop"
-
-$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$SourceUdl = Join-Path $RepoRoot "mobile\ffi\aibridge.udl"
-$TargetDir = Join-Path $RepoRoot "core\ffi\src"
-$TargetUdl = Join-Path $TargetDir "aibridge.udl"
-
-if (-not (Test-Path $SourceUdl)) {
-    Write-Error "缺少 UDL 事实源: $SourceUdl"
-    exit 1
-}
-
-$SourceBytes = [System.IO.File]::ReadAllBytes($SourceUdl)
+$repo = Split-Path -Parent $PSScriptRoot
+$source = Join-Path $repo "mobile/ffi/aibridge.udl"
+$copy = Join-Path $repo "core/ffi/src/aibridge.udl"
 
 if ($Check) {
-    if (-not (Test-Path $TargetUdl)) {
-        Write-Error "缺少 UDL 构建副本: $TargetUdl"
+    $same = ((Get-FileHash $source).Hash -eq (Get-FileHash $copy).Hash)
+    if (-not $same) {
+        Write-Host "FAIL  core/ffi/src/aibridge.udl differs from mobile/ffi/aibridge.udl -- run tools/sync-ffi-udl.ps1 to sync"
         exit 1
     }
-    $TargetBytes = [System.IO.File]::ReadAllBytes($TargetUdl)
-    $SourceHash = (Get-FileHash -Path $SourceUdl -Algorithm SHA256).Hash
-    $TargetHash = (Get-FileHash -Path $TargetUdl -Algorithm SHA256).Hash
-    if ($SourceBytes.Length -ne $TargetBytes.Length -or $SourceHash -ne $TargetHash) {
-        Write-Error "UDL 不同步: mobile/ffi/aibridge.udl ($SourceHash) != core/ffi/src/aibridge.udl ($TargetHash)"
-        exit 1
-    }
-    Write-Host "[OK] UDL 一致 ($SourceHash, $($SourceBytes.Length) bytes)"
+    Write-Host "PASS  FFI UDL copy matches the source of truth"
     exit 0
 }
 
-if (-not (Test-Path $TargetDir)) {
-    New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
-}
-
-[System.IO.File]::WriteAllBytes($TargetUdl, $SourceBytes)
-Write-Host "[OK] 已同步 UDL: mobile/ffi/aibridge.udl -> core/ffi/src/aibridge.udl ($($SourceBytes.Length) bytes)"
+Copy-Item $source $copy -Force
+Write-Host "synced mobile/ffi/aibridge.udl -> core/ffi/src/aibridge.udl"

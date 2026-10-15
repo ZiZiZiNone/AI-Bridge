@@ -1,46 +1,108 @@
-import Foundation
+import AVFoundation
 import SwiftUI
+import UIKit
 
-/// M7 扫码视图：扫码结果必须先经 `PairingQrParser.parseQrPayload` 提取 64 位 SHA-256 公钥指纹，
-/// 禁止将原始 QR 字符串直接当作 `remote_fingerprint` 传给 `confirm`。
-public struct QRScanView: View {
-    public let onConfirmOffer: (PairingQrParser.ParsedOffer) -> Void
-    @State private var rawQrInput: String = ""
-    @State private var errorMessage: String?
+/// M7 QR 扫描（E3：扫桌面 QR）。薄入口：扫码结果原样回调，配对与指纹语义在 core（ab-sync）。
+struct QRScanView: UIViewControllerRepresentable {
+    let onScan: (String) -> Void
 
-    public init(onConfirmOffer: @escaping (PairingQrParser.ParsedOffer) -> Void) {
-        self.onConfirmOffer = onConfirmOffer
+    func makeUIViewController(context: Context) -> QRScanViewController {
+        QRScanViewController(onScan: onScan)
     }
 
-    public func submitScannedPayload(_ raw: String) -> Bool {
-        guard let offer = PairingQrParser.parseQrPayload(raw),
-              PairingQrParser.isValidFingerprint(offer.fingerprint) else {
-            errorMessage = "二维码不含有效的 X25519 公钥指纹，已拒绝"
-            return false
-        }
-        errorMessage = nil
-        onConfirmOffer(offer)
-        return true
+    func updateUIViewController(_ uiViewController: QRScanViewController, context: Context) {}
+}
+
+final class QRScanViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    private let onScan: (String) -> Void
+    private let session = AVCaptureSession()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var delivered = false
+
+    init(onScan: @escaping (String) -> Void) {
+        self.onScan = onScan
+        super.init(nibName: nil, bundle: nil)
     }
 
-    public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("扫描配对二维码")
-                .font(.headline)
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("unused")
+    }
 
-            TextField("粘贴或扫描配对二维码载荷", text: $rawQrInput)
-                .textFieldStyle(.roundedBorder)
-
-            if let errorMessage {
-                Text(errorMessage)
-                    .foregroundColor(.red)
-                    .font(.caption)
-            }
-
-            Button("解析并核对指纹") {
-                _ = submitScannedPayload(rawQrInput)
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            DispatchQueue.main.async {
+                if granted {
+                    self?.configure()
+                } else {
+                    self?.showNotice("扫描 QR 需要相机权限（可在系统设置中开启）。")
+                }
             }
         }
-        .padding()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer?.frame = view.bounds
+    }
+
+    private func configure() {
+        guard
+            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+            let input = try? AVCaptureDeviceInput(device: device),
+            session.canAddInput(input)
+        else {
+            showNotice("相机不可用。")
+            return
+        }
+        session.addInput(input)
+
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else {
+            showNotice("相机不可用。")
+            return
+        }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
+        output.metadataObjectTypes = [.qr]
+
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.videoGravity = .resizeAspectFill
+        preview.frame = view.bounds
+        view.layer.addSublayer(preview)
+        previewLayer = preview
+        session.startRunning()
+    }
+
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        guard !delivered,
+              let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+              object.type == .qr,
+              let value = object.stringValue
+        else { return }
+        delivered = true
+        session.stopRunning()
+        onScan(value)
+    }
+
+    private func showNotice(_ text: String) {
+        let label = UILabel()
+        label.text = text
+        label.textColor = .white
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
+        ])
     }
 }

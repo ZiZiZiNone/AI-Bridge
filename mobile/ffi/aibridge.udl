@@ -1,6 +1,31 @@
-// AI-Bridge · UniFFI 接口声明（事实源：mobile/ffi/aibridge.udl，构建副本：core/ffi/src/aibridge.udl）
+// AI-Bridge · UniFFI 接口声明（core API 镜像 · 声明骨架）
+//
+// 唯一事实源：
+//   - core 各 crate 的 Rust 公开面（docs/架构与契约.md §2 的"公开面"列）
+//   - 契约字段（contracts/*.schema.json，逐字段一致）
+// 本文件是**声明骨架**：Swift / Kotlin 绑定产物由 uniffi-bindgen 生成，生成物禁止手改
+// （生成步骤见 mobile/README.md「FFI 生成」）。core/ab-ffi 已落地（core/ffi/，机械镜像）。
+//
+// 随 ab-ffi 落地做的机械对齐（详见 core/ffi/README.md「UDL 漂移与对齐记录」）：
+//   - 宿主注入 trait 由 [Trait] 改为 [Trait, WithForeign]：UniFFI 0.29 的 [Trait] 只允许
+//     Rust 实现，[Trait, WithForeign] 才对应「绑定侧（Swift / Kotlin）由宿主实现」的声明意图。
+//   - ContractError 由 [Error] enum 改为 [Error] interface：UniFFI 0.29 的带字段错误枚举
+//     只接受 [Error] interface 语法（变体写作 Name(字段, ...)），变体与 core
+//     `ab_contract::ContractError` 逐变体一致。
+//   - 补 A6 备份面（core `VaultSession::save/recovery_copy/from_backup`、
+//     `RecoveryKey::generate/display/from_display/open_copy`）；AuditAction 补 RENEW/USE
+//     （core `ab-audit` 的 AuditAction 含 Renew/Use，须 1:1 镜像）。
+//   - 补 A5 生成器面（core `generate_passphrase` / `PassphraseSpec` / `entropy_bits`）：
+//     dictionary 不能挂方法，`entropy_bits` 机械镜像为自由函数 `*_entropy_bits`。
+//
+// 命名：契约字段一律 snake_case，与 schema 逐字段一致；生成器可能按语言惯例把方法/字段
+//       转成 camelCase，但跨端载荷（JSON）始终以 schema 的 snake_case 为准（由 serde 负责）。
+// 依赖方向：宿主 → 本声明 → core；core 永不依赖任何宿主类型（Tauri / WebView / 平台对象）。
+// 注入规则：core 全部外部能力以 trait 注入（VaultStore / SessionSource / Transport / Clock /
+//           Entropy）；本文件不提供任何单例式全局访问器。
 
 namespace aibridge {
+    // 组合根：core 对象由宿主显式构造并注入全部 trait（无单例、无服务定位器）。
     AibridgeCore new_core(
         CoreConfig config,
         VaultStore vault_store,
@@ -9,10 +34,17 @@ namespace aibridge {
         Clock clock,
         Entropy entropy
     );
+
+    // A5.1 实时强度条数值（core `GeneratorSpec::entropy_bits`）。
+    // UDL dictionary 不能挂方法，机械镜像为同名后缀的自由函数。
+    [Throws=CoreError] double generator_entropy_bits(GeneratorSpec spec);
+    // A5.1 实时强度条数值（core `PassphraseSpec::entropy_bits`）。
+    [Throws=CoreError] double passphrase_entropy_bits(PassphraseSpec spec);
 };
 
 /* ======================= core 公开面（对象） ======================= */
 
+// 聚合入口：各子模块对象由 core 持有，宿主只经本对象取得句柄。
 interface AibridgeCore {
     Vault vault();
     StateBus state();
@@ -22,6 +54,8 @@ interface AibridgeCore {
     AuditLog audit();
 };
 
+// ab-vault：加密库（条目 / 回收站 / passkey / TOTP / 生成器）。
+// 存储经 `VaultStore` 注入；本声明不含任何文件 IO 语义。
 interface Vault {
     [Throws=CoreError] void unlock(string master_password);
     void lock();
@@ -33,9 +67,34 @@ interface Vault {
     sequence<EntrySummary> trash();
     [Throws=CoreError] void restore(string account_ref);
     [Throws=CoreError] GeneratedSecret generate(GeneratorSpec spec);
+    // A5.2 口令词模式（core `generate_passphrase`）：词表/词数/分隔符全由调用方配置，
+    // core 无内置词表，本层不设默认值。
+    [Throws=CoreError] string generate_passphrase(PassphraseSpec spec);
     [Throws=CoreError] string totp(string account_ref);
+    // A6.1 手动备份：把当前库写回注入的 VaultStore（core `VaultSession::save`）。
+    [Throws=CoreError] void save();
+    // A6.4 恢复密钥加密副本（core `VaultSession::recovery_copy`）：同库内容、独立盐/流密钥。
+    [Throws=CoreError] bytes recovery_copy(RecoveryKey recovery);
+    // A6.9 备份字节装载（core `VaultSession::from_backup`）：装入本句柄，替换当前会话。
+    [Throws=CoreError] void from_backup(string master_password, bytes data);
+    // A6.9 恢复导入（core `RecoveryKey::open_copy`）：恢复密钥开副本，装入本句柄。
+    [Throws=CoreError] void open_copy(RecoveryKey recovery, bytes data);
 };
 
+// 恢复密钥（A6.4 / A6.9；core `RecoveryKey`）：不透明句柄，秘密不进 Debug/错误文本。
+// 一次性展示是宿主纪律，core 不拦重复调用。
+interface RecoveryKey {
+    // core `RecoveryKey::generate`：熵经注入的 Entropy。
+    [Name=generate, Throws=CoreError]
+    constructor(Entropy entropy);
+    // core `RecoveryKey::from_display`：从展示形态恢复（忽略空白）。
+    [Name=from_display, Throws=CoreError]
+    constructor(string text);
+    // core `RecoveryKey::display`：离线保存的展示形态。
+    string display();
+};
+
+// ab-state：会话状态（清单矩阵 / 快照 / 回滚 / 健康）；浏览器与容器经 `SessionSource` 注入。
 interface StateBus {
     sequence<MatrixRow> matrix();
     [Throws=CoreError] SessionEnvelope capture(string source_id, string domain);
@@ -44,6 +103,7 @@ interface StateBus {
     HealthReport health();
 };
 
+// ab-broker：临时会话（签发 / TTL / 空闲 / 撤销表）；真实会话由 broker 代持。
 interface Broker {
     [Throws=CoreError] IssuedSession issue(ScopeSpec scope, u32 ttl_seconds);
     [Throws=CoreError] IssuedSession renew(string session_id, u32 ttl_seconds);
@@ -54,6 +114,7 @@ interface Broker {
     sequence<IssuedSession> sweep();
 };
 
+// ab-sync：配对与传输（X25519 指纹配对 / 局域网直传 / A8 离线包）。
 interface SyncEngine {
     [Throws=CoreError] PairingTicket pair();
     [Throws=CoreError] PairingTicket confirm(string ticket_id, string remote_fingerprint);
@@ -62,25 +123,34 @@ interface SyncEngine {
     [Throws=CoreError] sequence<SessionEnvelope> unpack(bytes package);
 };
 
+// ab-converter：转换器宿主（验签 / 加载 / 沙盒执行）。
+// 移动端不执行转换器（转换器读取桌面本地数据产物）；保留镜像以保持接口面完整。
 interface ConverterHost {
     [Throws=CoreError] void load(ConverterManifest manifest);
     [Throws=CoreError] ManifestVerification verify(ConverterManifest manifest);
     [Throws=CoreError] StandardAccess run_extract(string converter_id, string level);
 };
 
+// ab-audit：追加式审计（只追加，不删改历史）。
 interface AuditLog {
+    // 审计写入唯一入口，fail-closed：审计写入失败时敏感操作必须拒绝执行。
     [Throws=CoreError] void record_or_fail(AuditEvent event);
     sequence<AuditEvent> query(AuditFilter filter);
 };
 
+// ab-mcp：MCP server（rmcp，stdio + Streamable HTTP）。
+// 仅 desktop 宿主启动；移动端无 MCP 客户端，保留镜像以保持接口面完整。
 interface McpServer {
     [Throws=CoreError] void serve();
     sequence<McpTool> tools();
 };
 
 /* ======================= 宿主必须实现的 traits ======================= */
+// core 经构造注入调用这些 trait；绑定侧（Swift / Kotlin）由宿主实现。
+// 这五个 trait 是"极致解耦"判据的落点：把 core 搬进单测时替换它们即可，不改 core 内部代码。
 
-[Trait]
+// 加密库存储：只存不透明字节，键值语义由 core 决定。
+[Trait, WithForeign]
 interface VaultStore {
     [Throws=CoreError] bytes read(string key);
     [Throws=CoreError] void write(string key, bytes value);
@@ -88,31 +158,37 @@ interface VaultStore {
     [Throws=CoreError] sequence<string> list_keys();
 };
 
-[Trait]
+// 会话来源：浏览器扩展 / App 容器（WKWebView / Android WebView）。
+// cookie 属性必须完整往返（会话保真度关键）。
+[Trait, WithForeign]
 interface SessionSource {
     sequence<string> available_sources();
     sequence<Cookie> capture(string source_id, string domain);
     void inject(string source_id, sequence<Cookie> cookies);
 };
 
-[Trait]
+// 传输：局域网直传 / 离线包搬运；core 不持有任何网络句柄。
+[Trait, WithForeign]
 interface Transport {
     sequence<PeerInfo> peers();
     [Throws=CoreError] void send(string peer_id, bytes payload);
     bytes? receive(u32 timeout_millis);
 };
 
-[Trait]
+// 时钟：注入以便单测与 TTL 判定（core 不自取系统时间）。
+[Trait, WithForeign]
 interface Clock {
     i64 now_unix_secs();
 };
 
-[Trait]
+// 熵源：生成器与密钥派生的随机来源（core 不自取系统随机）。
+[Trait, WithForeign]
 interface Entropy {
     bytes fill(u32 length);
 };
 
 /* ======================= 契约层镜像（contracts/*.schema.json） ======================= */
+// 与 schema 逐字段一致；新增字段一律可选（版本化规则见 docs/架构与契约.md §6）。
 
 dictionary CoreConfig {
     string data_dir;
@@ -148,6 +224,7 @@ dictionary Payload {
     record<string, string> local_storage;
 };
 
+// schema 字段名为 "type"（core 侧以 serde rename 承载），UDL 侧用 source_type 以免与语言关键字冲突。
 dictionary Source {
     SourceType source_type;
     string id;
@@ -214,7 +291,7 @@ dictionary ConverterManifest {
     string? min_app_version;
 };
 
-/* ======================= core 内部数据结构 ======================= */
+/* ======================= core 内部数据结构（非契约） ======================= */
 
 dictionary EntrySummary {
     string account_ref;
@@ -242,6 +319,13 @@ dictionary GeneratorSpec {
     boolean uppercase;
     boolean digits;
     boolean symbols;
+};
+
+// A5.2 口令词模式（core `ab_vault::PassphraseSpec` 逐字段镜像）：无默认值。
+dictionary PassphraseSpec {
+    sequence<string> words;
+    u32 word_count;
+    string separator;
 };
 
 dictionary GeneratedSecret {
@@ -277,6 +361,7 @@ dictionary ScopeSpec {
     boolean single_use;
 };
 
+// 会话捕获环境（UA 绑定）：捕获时记录、扩散随行、注入容器时对齐；不一致时提示可能触发风控。
 dictionary ClientEnv {
     string user_agent;
     string platform;
@@ -343,11 +428,12 @@ enum SessionKind { "COOKIE", "TOKEN", "CREDENTIAL" };
 enum TargetKind { "WEB", "APP", "CONTAINER" };
 enum SameSite { "STRICT", "LAX", "NONE" };
 enum SourceType { "EXTENSION", "CONVERTER", "MOBILE", "MANUAL", "SYNC" };
-enum AuditAction { "UNLOCK", "LOCK", "CAPTURE", "INJECT", "FILL", "ISSUE", "RELEASE", "REVOKE", "REVOKE_ALL", "SWEEP", "EXTRACT", "CONVERTER_LOAD", "CONVERTER_REJECT", "PAIR", "SYNC", "VAULT_WRITE", "VAULT_DELETE", "RESTORE", "EXPORT" };
+enum AuditAction { "UNLOCK", "LOCK", "CAPTURE", "INJECT", "FILL", "ISSUE", "RENEW", "RELEASE", "REVOKE", "REVOKE_ALL", "SWEEP", "USE", "EXTRACT", "CONVERTER_LOAD", "CONVERTER_REJECT", "PAIR", "SYNC", "VAULT_WRITE", "VAULT_DELETE", "RESTORE", "EXPORT" };
 enum AuditResult { "OK", "DENIED", "FAILED" };
 
 /* ======================= 错误 ======================= */
 
+// core 内部错误（各 crate 细分错误待对应 crate 落地时收敛；骨架阶段统一经 CoreError 导出）。
 [Error]
 enum CoreError {
     "CONTRACT",
@@ -360,16 +446,18 @@ enum CoreError {
     "INTERNAL",
 };
 
+// ab-contract 的 ContractError 逐变体镜像（core/contract/src/lib.rs 已实现）。
+// UniFFI 0.29 带字段错误枚举语法：[Error] interface + 变体 Name(字段, ...);（逐变体镜像 core）。
 [Error]
-enum ContractError {
-    UnsupportedSchemaVersion(string version),
-    InvalidId(string field, string value),
-    EmptyField(string name),
-    TargetFieldMissing(string name),
-    PayloadMismatch(SessionKind kind, string expected),
-    UnsupportedAlgorithm(string algorithm),
-    MissingExpiry,
-    MissingScope,
-    PlaceholderSignature,
-    InvalidModuleHash,
+interface ContractError {
+    UnsupportedSchemaVersion(string version);
+    InvalidId(string field, string value);
+    EmptyField(string name);
+    TargetFieldMissing(string name);
+    PayloadMismatch(SessionKind kind, string expected);
+    UnsupportedAlgorithm(string algorithm);
+    MissingExpiry();
+    MissingScope();
+    PlaceholderSignature();
+    InvalidModuleHash();
 };

@@ -21,7 +21,6 @@ fun credentialKindLabel(kind: CredentialKind): String = when (kind) {
     CredentialKind.PASSWORD -> "账号密码"
     CredentialKind.PASSKEY -> "passkey"
     CredentialKind.TOTP -> "TOTP"
-    else -> "账号类"
 }
 
 /** 目标类型标签（会话矩阵列）。 */
@@ -29,7 +28,6 @@ fun targetKindLabel(kind: TargetKind): String = when (kind) {
     TargetKind.WEB -> "Web"
     TargetKind.APP -> "App"
     TargetKind.CONTAINER -> "容器"
-    else -> "-"
 }
 
 /** 来源标记（A2.3：每条会话标注来自哪个端 / 转换器 / 扩散事件）。 */
@@ -39,7 +37,6 @@ fun sourceTypeLabel(source: SourceType): String = when (source) {
     SourceType.MOBILE -> "手机"
     SourceType.MANUAL -> "手动"
     SourceType.SYNC -> SYNC_ITEM_LABEL
-    else -> "-"
 }
 
 /** 设备类型标签（E3：设备仅 Windows / iOS / Android；core 侧枚举值原样映射）。 */

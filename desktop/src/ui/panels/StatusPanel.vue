@@ -1,6 +1,12 @@
 <template>
   <WindowShell title="状态清单" no="W4">
     <div class="view">
+      <p class="view__hint">
+        A2 会话矩阵 / A3 会话健康 / A7 快照回滚 / B1.3 目标状态。
+        双视图：①总览（主库 / 设备同步 / 安全 / 最近操作）②会话矩阵（账号 × 端 × 来源 × 到期）。
+        矩阵数据来自 core（ab-state）归一化的 SessionRecord，UI 只按契约字段呈现。
+      </p>
+
       <StateBlock
         :state="props.state"
         :error-message="props.errorMessage"
@@ -36,6 +42,10 @@ import WindowShell from '../components/WindowShell.vue';
 import type { SessionRecord } from '../../types/contract';
 import type { UIState } from '../../types/ui';
 
+/**
+ * W4 状态清单面板（弹出面板）。
+ * 受控视图：数据由 props 传入、刷新意图经 emit 上报；业务判断（到期、健康）在 core。
+ */
 interface Props {
   sessions?: SessionRecord[];
   state?: UIState;

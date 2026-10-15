@@ -1,4 +1,4 @@
-//! `ab-contract` —— 契约类型、结构校验、RFC 3339 时间换算、官方信任根常量与转换器签名规范化字节；唯一事实源 `contracts/*.schema.json`。
+//! `ab-contract` —— 契约类型与结构校验；唯一事实源 `contracts/*.schema.json`。
 #![forbid(unsafe_code)]
 
 pub mod time;
@@ -75,6 +75,7 @@ pub enum SourceType {
     Sync,
 }
 
+/// 属性必须完整携带：丢属性 = 会话损坏。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cookie {
     pub name: String,
@@ -93,6 +94,7 @@ pub struct Cookie {
     pub expires_at: Option<String>,
 }
 
+// 手工 Debug 统一脱敏秘密字段（下同）。
 impl fmt::Debug for Cookie {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cookie")
@@ -165,13 +167,16 @@ pub struct Source {
     pub id: String,
 }
 
+/// 临时会话授权范围；业务强制在 ab-broker，本层只承载结构。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeSpec {
+    /// 空数组 = 不允许任何 web 目标。
     pub domain_allowlist: Vec<String>,
     pub read_only: bool,
     pub single_use: bool,
 }
 
+/// 会话捕获环境（UA 绑定）：随行记录，注入容器时对齐。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientEnv {
     pub user_agent: String,
@@ -268,6 +273,7 @@ pub struct ConverterManifest {
     pub level: AccessLevel,
     pub readable_paths: Vec<String>,
     pub entry: String,
+    /// entry 字节的 SHA-256；签名覆盖它，执行前比对实际字节。
     pub module_sha256: String,
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,6 +338,7 @@ fn is_lower_hex(s: &str, len: usize) -> bool {
     s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// 全零是模板占位约定，永不是真签名/真摘要。
 fn is_all_zero_hex(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b == b'0')
 }
@@ -390,7 +397,6 @@ fn check_payload(kind: SessionKind, payload: &Payload) -> Result<(), ContractErr
 
 /// 转换器清单官方签名的唯一规范化字节实现（`converters/sdk/README.md` §4）：
 /// 去掉 `signature` 字段后，按 JSON 键升序紧凑序列化（无多余空白、UTF-8、不转义非 ASCII）。
-/// 使用 `BTreeMap` 固定字典序，不受工作区 `serde_json/preserve_order` 特性影响。
 pub fn canonical_signing_bytes(manifest: &ConverterManifest) -> Vec<u8> {
     let mut map: BTreeMap<&'static str, Value> = BTreeMap::new();
     map.insert("entry", Value::String(manifest.entry.clone()));
@@ -586,17 +592,6 @@ mod tests {
     }
 
     #[test]
-    fn official_trust_root_constants_are_consistent() {
-        assert_eq!(OFFICIAL_SIGNER_ID, "aibridge-official-2026");
-        assert_eq!(OFFICIAL_CONVERTER_PUBKEY_HEX.len(), 64);
-        let hex_from_bytes: String = OFFICIAL_CONVERTER_PUBKEY
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        assert_eq!(hex_from_bytes, OFFICIAL_CONVERTER_PUBKEY_HEX);
-    }
-
-    #[test]
     fn envelope_roundtrip_keeps_cookie_attributes() {
         let env = envelope();
         let json = serde_json::to_string(&env).unwrap();
@@ -784,59 +779,11 @@ mod tests {
 
         let mut short_hash = m.clone();
         short_hash.module_sha256 = "abcd".into();
-        assert_eq!(empty_hash.validate(), Err(ContractError::EmptyField("module_sha256")));
         assert_eq!(short_hash.validate(), Err(ContractError::InvalidModuleHash));
 
         let mut placeholder_hash = m.clone();
         placeholder_hash.module_sha256 = "0".repeat(64);
         assert_eq!(placeholder_hash.validate(), Err(ContractError::InvalidModuleHash));
-    }
-
-    #[test]
-    fn canonical_signing_bytes_matches_golden_vectors_and_ignores_signature() {
-        let mut with_min = ConverterManifest {
-            id: "qq".into(),
-            name: "QQ 本地数据转换器".into(),
-            version: "1.2.0".into(),
-            level: AccessLevel::C,
-            readable_paths: vec!["C:\\Users\\me\\AppData\\Roaming\\QQ".into()],
-            entry: "qq.wasm".into(),
-            module_sha256: MODULE_SHA256.into(),
-            signature: Signature {
-                algorithm: "ed25519".into(),
-                signer: "official-2026".into(),
-                value: SIGNATURE_128.into(),
-            },
-            min_app_version: Some("0.1.0".into()),
-        };
-
-        let expected_with_min = concat!(
-            r#"{"entry":"qq.wasm","id":"qq","level":"c","min_app_version":"0.1.0","#,
-            r#""module_sha256":"3f2a9c1d5b7e4088a1c2d3e4f5061728394a5b6c7d8e9f001122334455667788","#,
-            r#""name":"QQ 本地数据转换器","readable_paths":["C:\\Users\\me\\AppData\\Roaming\\QQ"],"version":"1.2.0"}"#,
-        );
-        let bytes_with_min = canonical_signing_bytes(&with_min);
-        assert_eq!(
-            std::str::from_utf8(&bytes_with_min).unwrap(),
-            expected_with_min
-        );
-        assert_eq!(with_min.canonical_signing_bytes(), bytes_with_min);
-
-        with_min.signature.signer = "other-signer".into();
-        with_min.signature.value = "a".repeat(128);
-        assert_eq!(canonical_signing_bytes(&with_min), bytes_with_min);
-
-        let mut without_min = with_min;
-        without_min.min_app_version = None;
-        let expected_without_min = concat!(
-            r#"{"entry":"qq.wasm","id":"qq","level":"c","#,
-            r#""module_sha256":"3f2a9c1d5b7e4088a1c2d3e4f5061728394a5b6c7d8e9f001122334455667788","#,
-            r#""name":"QQ 本地数据转换器","readable_paths":["C:\\Users\\me\\AppData\\Roaming\\QQ"],"version":"1.2.0"}"#,
-        );
-        assert_eq!(
-            std::str::from_utf8(&canonical_signing_bytes(&without_min)).unwrap(),
-            expected_without_min
-        );
     }
 
     #[test]

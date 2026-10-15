@@ -2,12 +2,13 @@
 name = "ab-broker"
 version.workspace = true
 edition.workspace = true
-description = "临时会话代理：签发 · TTL 与空闲到期自动收回 · 单次消费即焚 · 作用域守卫 · 撤销广播"
+description = "临时会话 broker：签发 / TTL / 空闲 / 撤销表 / scope 强制（真会话代持，AI 拿不到真实凭据）"
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
-ab-crypto = { path = "../crypto" }
 ab-contract = { path = "../contract" }
-ab-state = { path = "../state" }
+ab-crypto = { path = "../crypto" }
 ab-audit = { path = "../audit" }
+
+[dev-dependencies]
+serde_json.workspace = true

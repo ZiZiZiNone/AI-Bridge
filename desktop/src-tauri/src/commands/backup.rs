@@ -20,7 +20,7 @@ use ab_vault::{RecoveryKey, VaultError, VaultSession, VaultStore};
 use serde::{Deserialize, Serialize};
 
 use super::{now_unix_secs, now_rfc3339, record, CmdResult};
-use crate::host::HostServices;
+use crate::host::HostState;
 
 /// 备份报告（W7 展示；只回文件名，不回完整路径）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,12 +76,12 @@ impl VaultStore for FileStore {
     }
 }
 
-fn backup_dir(services: &HostServices) -> PathBuf {
+fn backup_dir(services: &HostState) -> PathBuf {
     services.paths.backup_dir()
 }
 
 /// 最新备份文件对（按文件名中的纪元秒取最大；无备份返回 None）。
-fn latest_pair(services: &HostServices) -> Option<(PathBuf, PathBuf)> {
+fn latest_pair(services: &HostState) -> Option<(PathBuf, PathBuf)> {
     let dir = backup_dir(services);
     let mut stamps: Vec<(i64, String)> = std::fs::read_dir(&dir)
         .ok()?
@@ -111,7 +111,7 @@ fn same_entry_set(a: &VaultSession, b: &VaultSession) -> bool {
     left == right
 }
 
-fn recovery_key(services: &HostServices) -> CmdResult<RecoveryKey> {
+fn recovery_key(services: &HostState) -> CmdResult<RecoveryKey> {
     let guard = services
         .recovery
         .lock()
@@ -129,7 +129,7 @@ fn recovery_key(services: &HostServices) -> CmdResult<RecoveryKey> {
 /* ---------------- 纯函数 ---------------- */
 
 /// A6.1/A6.2/A6.4 备份：主备份（主口令）+ 恢复密钥加密副本 + 自动解密校验（A6.7）。
-pub fn run(services: &HostServices, password: Option<&str>) -> CmdResult<BackupReport> {
+pub fn run(services: &HostState, password: Option<&str>) -> CmdResult<BackupReport> {
     let session_guard = services
         .vault
         .lock()
@@ -209,7 +209,7 @@ pub fn run(services: &HostServices, password: Option<&str>) -> CmdResult<BackupR
 }
 
 /// W7 状态：最后验证时间 + 备份文件清单。
-pub fn status(services: &HostServices) -> CmdResult<BackupStatusView> {
+pub fn status(services: &HostState) -> CmdResult<BackupStatusView> {
     let meta = services.backup_meta();
     let mut files: Vec<String> = std::fs::read_dir(backup_dir(services))
         .map_err(|error| error.to_string())?
@@ -226,7 +226,7 @@ pub fn status(services: &HostServices) -> CmdResult<BackupStatusView> {
 }
 
 /// A6.8 恢复演练：沙盒打开最新备份（不替换活动库）并比对条目集。
-pub fn drill(services: &HostServices, password: Option<&str>) -> CmdResult<DrillReport> {
+pub fn drill(services: &HostState, password: Option<&str>) -> CmdResult<DrillReport> {
     let session_guard = services
         .vault
         .lock()
@@ -290,7 +290,7 @@ pub fn drill(services: &HostServices, password: Option<&str>) -> CmdResult<Drill
 }
 
 /// A6.9 恢复：从最新主备份恢复（主口令路径）。
-pub fn restore_with_password(services: &HostServices, password: &str) -> CmdResult<()> {
+pub fn restore_with_password(services: &HostState, password: &str) -> CmdResult<()> {
     let (main_path, _) = latest_pair(services).ok_or("无可用备份")?;
     let bytes = std::fs::read(&main_path).map_err(|error| error.to_string())?;
     let session = VaultSession::from_backup(password.as_bytes(), &bytes)
@@ -299,7 +299,7 @@ pub fn restore_with_password(services: &HostServices, password: &str) -> CmdResu
 }
 
 /// A6.9 恢复：从恢复密钥副本恢复（S3 唯一后门，免主口令）。
-pub fn restore_with_recovery(services: &HostServices, recovery_display: &str) -> CmdResult<()> {
+pub fn restore_with_recovery(services: &HostState, recovery_display: &str) -> CmdResult<()> {
     let (_, recovery_path) = latest_pair(services).ok_or("无可用备份")?;
     let bytes = std::fs::read(&recovery_path).map_err(|error| error.to_string())?;
     let recovery = RecoveryKey::from_display(recovery_display).map_err(|error| error.to_string())?;
@@ -311,20 +311,20 @@ pub fn restore_with_recovery(services: &HostServices, recovery_display: &str) ->
 
 #[tauri::command]
 pub fn backup_run(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     password: Option<String>,
 ) -> CmdResult<BackupReport> {
     run(&state, password.as_deref())
 }
 
 #[tauri::command]
-pub fn backup_status(state: tauri::State<'_, HostServices>) -> CmdResult<BackupStatusView> {
+pub fn backup_status(state: tauri::State<'_, HostState>) -> CmdResult<BackupStatusView> {
     status(&state)
 }
 
 #[tauri::command]
 pub fn backup_drill(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     password: Option<String>,
 ) -> CmdResult<DrillReport> {
     drill(&state, password.as_deref())
@@ -332,7 +332,7 @@ pub fn backup_drill(
 
 #[tauri::command]
 pub fn backup_restore_with_password(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     password: String,
 ) -> CmdResult<()> {
     restore_with_password(&state, &password)
@@ -340,7 +340,7 @@ pub fn backup_restore_with_password(
 
 #[tauri::command]
 pub fn backup_restore_with_recovery(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     recovery_display: String,
 ) -> CmdResult<()> {
     restore_with_recovery(&state, &recovery_display)
@@ -350,22 +350,18 @@ pub fn backup_restore_with_recovery(
 mod tests {
     use super::*;
     use crate::commands::library;
-    use crate::host::{HostPaths, HostServices, OfficialVerifier};
+    use crate::host::{HostLayout, HostState, HostSignatureVerifier};
     use ab_audit::InMemoryAuditSink;
     use ab_contract::CredentialKind;
     use std::sync::Arc;
 
-    fn test_services() -> HostServices {
-        let root = std::env::temp_dir().join(format!(
-            "aibridge-backup-test-{}-{}",
-            std::process::id(),
-            now_unix_secs()
-        ));
+    fn test_services() -> HostState {
+        let root = crate::host::test_root("aibridge-backup-test");
         let _ = std::fs::remove_dir_all(&root);
-        HostServices::build_with(
+        HostState::build_with(
             "pc-test",
-            HostPaths { root },
-            OfficialVerifier::new(None, None),
+            HostLayout { root },
+            HostSignatureVerifier::new(None, None),
             Arc::new(InMemoryAuditSink::new()),
         )
     }

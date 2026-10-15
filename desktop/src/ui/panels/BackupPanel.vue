@@ -1,11 +1,16 @@
 <template>
   <WindowShell title="备份" no="W7">
     <div class="view">
+      <p class="view__hint">
+        A6 备份与恢复。全部备份强制加密（A6.4），本视图只呈现状态与开关，
+        加密、快照保留策略、自动校验规则均在 core。
+      </p>
+
       <dl class="facts">
         <dt>最后验证时间</dt>
         <dd>{{ lastVerifiedAt }}</dd>
         <dt>托管目录</dt>
-        <dd class="facts__path">建议放置于外接盘或异盘</dd>
+        <dd class="facts__path">（未设置，建议放外接盘或异盘，防勒索连锅端）</dd>
         <dt>定时备份</dt>
         <dd><label><input v-model="scheduled" type="checkbox" /> 默认月度，频率可调</label></dd>
       </dl>
@@ -21,7 +26,12 @@
 import { ref } from 'vue';
 import WindowShell from '../components/WindowShell.vue';
 
-const lastVerifiedAt = ref('—');
+/**
+ * W7 备份面板（弹出面板）。
+ * 承载：A6.1 手动备份、A6.5 托管目录、A6.6 滚动保留、A6.7 自动校验、A6.8 恢复演练、A6.9 恢复导入。
+ * 骨架期未接 core：验证时间与开关为占位（开关的持久化与生效规则在 core，UI 不判断）。
+ */
+const lastVerifiedAt = ref('（未接入）');
 const scheduled = ref(false);
 </script>
 

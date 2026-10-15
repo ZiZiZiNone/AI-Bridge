@@ -23,7 +23,17 @@ final class SafariCookieBridge: SessionSource {
     func capture(sourceId: String, domain: String) -> [Cookie] {
         lock.lock()
         defer { lock.unlock() }
-        return captured
+        let target = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        guard !target.isEmpty else { return [] }
+        return captured.filter { cookie in
+            guard let raw = cookie.domain else { return false }
+            let cd = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                .lowercased()
+            return !cd.isEmpty && (target == cd || target.hasSuffix("." + cd))
+        }
     }
 
     /// core 注入：暂存待写回 cookie，由 JS 下次拉取后写入 Safari（属性全量）。

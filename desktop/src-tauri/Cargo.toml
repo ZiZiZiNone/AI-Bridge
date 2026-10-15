@@ -5,21 +5,53 @@ edition = "2021"
 description = "AI-Bridge Windows 桌面端（Tauri 2 宿主层，薄入口）"
 publish = false
 
+# 独立 workspace：仓库根 Cargo.toml 的 members 仅为 core/*，本 crate 不入其 members，
+# 也不改动根清单（本任务写 scope 仅 desktop/）。待根清单纳入本包后，可删除本表并把
+# 依赖改为 workspace = true（serde / serde_json 与根 workspace 版本线一致）。
 [workspace]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# 2026-10-12 起已编译验证：tauri 2.12.3（经 tools/fetch-vendor.py vendored 依赖离线解析），
+# cargo test 22/22 通过。运行时行为（真实 WebView / IPC / 托盘）仍未验证，见 desktop/README.md。
+# image-png：托盘图标从 PNG 字节构建（TrayIconBuilder / set_icon）。
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# 核心层（宿主 → core → 契约，单向依赖；core 不得反向依赖 desktop，见 check:structure 规则⑦）。
+# commands 层只做参数搬运与错误映射，业务规则一律在这些 crate 内。
 ab-contract = { path = "../../core/contract" }
 ab-crypto = { path = "../../core/crypto" }
-ab-converter = { path = "../../core/converter-host" }
+ab-vault = { path = "../../core/vault" }
 ab-state = { path = "../../core/state" }
-ab-audit = { path = "../../core/audit" }
 ab-broker = { path = "../../core/broker" }
+ab-audit = { path = "../../core/audit" }
+ab-sync = { path = "../../core/sync" }
+ab-converter = { path = "../../core/converter-host" }
+ab-mcp = { path = "../../core/mcp" }
+
+# ab-mcp 的通道装配需要 tokio 运行时（stdio / 127.0.0.1 Streamable HTTP 均在宿主进程内嵌）。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net"] }
+
+# Windows 系统能力（native/）：DPAPI / CNG 随机 / Windows Hello / 剪贴板 / UIA / SendInput / 注册表。
+# 全部取自已 vendored 的 windows 0.62.2（离线解析）。
+windows = { version = "0.62", features = [
+  "Foundation",
+  "Security_Credentials_UI",
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+  "Win32_System_Com",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_Accessibility",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 codegen-units = 1

@@ -1,12 +1,13 @@
-//! 极简 RFC3339(UTC) 解析与格式化（全仓唯一实现）。
+//! RFC3339(UTC) ↔ Unix 纪元秒：契约 `date-time` 字段（`issued_at` / `expires_at`）的唯一编解码实现。
 //!
-//! 仓库核心依赖仅 `serde` / `serde_json`，`std` 无日历换算能力；契约 `date-time` 字段
-//! （`issued_at` / `expires_at` / `generated_at`）在状态层、临时会话层、MCP 与 FFI 层共用本模块。
+//! 仓库依赖仅 serde / serde_json，`std` 无日历换算能力；此前三份 crate 各持一份最小实现
+//! （ab-state 解析、ab-broker 格式化），按「同一业务规则只实现一份」上收到契约层。
 //!
-//! 支持 `YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)`：小数秒丢弃（秒级精度足够），
+//! 解析支持 `YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)`：小数秒丢弃（秒级精度足够），
 //! 闰秒（秒 = 60）不接受，非法输入返回 `None`（不 panic）。
+//! 格式化输出 `YYYY-MM-DDTHH:MM:SSZ`。换算用 Howard Hinnant 的 civil 算法（纪元 1970-01-01）。
 
-/// 解析 RFC 3339 时间字符串为 Unix 纪元秒（UTC）；非法输入返回 `None`。
+/// 解析为 Unix 纪元秒（UTC）；非法输入返回 `None`。
 pub fn parse_rfc3339_secs(input: &str) -> Option<i64> {
     let bytes = input.as_bytes();
     if bytes.len() < 20 {
@@ -90,17 +91,20 @@ pub fn parse_rfc3339_secs(input: &str) -> Option<i64> {
     )
 }
 
-/// 将 Unix 纪元秒格式化为 `YYYY-MM-DDTHH:MM:SSZ`（UTC）。
+/// 纪元秒（UTC）→ RFC3339 秒级精度字符串。
 pub fn format_rfc3339_secs(unix_secs: i64) -> String {
     let days = unix_secs.div_euclid(86_400);
-    let secs_of_day = unix_secs.rem_euclid(86_400);
-    let hour = secs_of_day / 3_600;
-    let minute = (secs_of_day % 3_600) / 60;
-    let second = secs_of_day % 60;
+    let rem = unix_secs.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
 }
 
+/// 按绝对字节区间取定长十进制；非数字或越界返回 `None`。
 fn digits(input: &str, start: usize, len: usize) -> Option<i64> {
     let end = start.checked_add(len)?;
     let slice = input.get(start..end)?;
@@ -129,6 +133,7 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     }
 }
 
+/// 公历日期 → 纪元天数（Howard Hinnant 的 days_from_civil，纪元为 1970-01-01）。
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = if year >= 0 { year } else { year - 399 } / 400;
@@ -139,35 +144,93 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
-    let z = days_since_epoch + 719_468;
+/// 纪元天数 → 公历日期（days_from_civil 的逆）。
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m, d)
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{format_rfc3339_secs, parse_rfc3339_secs};
 
+    // 期望值由 Python 3.11（datetime.timezone）独立算出，与实现无关。
     #[test]
-    fn parses_and_formats_known_epochs() {
+    fn parses_known_epochs() {
         let cases = [
             ("1970-01-01T00:00:00Z", 0),
+            ("1969-12-31T23:59:59Z", -1),
             ("2000-02-29T23:59:59Z", 951_868_799),
             ("2024-02-29T12:34:56Z", 1_709_210_096),
+            ("2100-03-01T00:00:00Z", 4_107_542_400),
+            ("2026-01-01T08:00:00+08:00", 1_767_225_600),
             ("2026-10-09T00:00:00Z", 1_791_504_000),
+            ("2026-10-09T08:00:00+08:00", 1_791_504_000),
+            ("2026-10-09T00:00:00.250Z", 1_791_504_000),
+            ("2026-10-09t00:00:00z", 1_791_504_000),
+            ("2026-10-08T16:00:00-08:00", 1_791_504_000),
         ];
-        for (text, secs) in cases {
-            assert_eq!(parse_rfc3339_secs(text), Some(secs));
-            assert_eq!(format_rfc3339_secs(secs), text);
+        for (input, expected) in cases {
+            assert_eq!(parse_rfc3339_secs(input), Some(expected), "输入 {input}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_input() {
+        let cases = [
+            "",
+            "garbage",
+            "2026-10-09T00:00:00",
+            "2026-10-09 00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-00-01T00:00:00Z",
+            "2026-10-00T00:00:00Z",
+            "2026-10-32T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2100-02-29T00:00:00Z",
+            "2023-02-29T00:00:00Z",
+            "2026-10-09T24:00:00Z",
+            "2026-10-09T00:60:00Z",
+            "2026-10-09T00:00:60Z",
+            "2026-10-09T00:00:00+25:00",
+            "2026-10-09T00:00:00+08:0",
+            "2026-10-09T00:00:00.Z",
+            "2026-10-09T00:00:00Z ",
+            "2026-1-09T00:00:00Z",
+            "0000-01-01T00:00:00Z",
+        ];
+        for input in cases {
+            assert_eq!(parse_rfc3339_secs(input), None, "输入 {input}");
+        }
+    }
+
+    #[test]
+    fn formats_known_epochs() {
+        let cases = [
+            (0, "1970-01-01T00:00:00Z"),
+            (-1, "1969-12-31T23:59:59Z"),
+            (951_868_799, "2000-02-29T23:59:59Z"),
+            (1_709_210_096, "2024-02-29T12:34:56Z"),
+            (4_107_542_400, "2100-03-01T00:00:00Z"),
+            (1_791_504_000, "2026-10-09T00:00:00Z"),
+        ];
+        for (secs, expected) in cases {
+            assert_eq!(format_rfc3339_secs(secs), expected, "纪元秒 {secs}");
+        }
+    }
+
+    #[test]
+    fn format_parse_roundtrip() {
+        for secs in [0_i64, -1, 951_868_799, 1_791_504_000, 4_107_542_400] {
+            assert_eq!(parse_rfc3339_secs(&format_rfc3339_secs(secs)), Some(secs));
         }
     }
 }

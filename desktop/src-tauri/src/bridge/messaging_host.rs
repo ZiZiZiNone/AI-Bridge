@@ -1,20 +1,24 @@
 //! native messaging host 主循环（浏览器扩展 ⇄ 主程序，仅本地进程内 stdio）。
 //!
-//! 职责：
-//! 1. 逐帧读取 4 字节小端长度前缀 + JSON 负载；
-//! 2. 将 `handshake` / `ping` / `session.capture` / `session.inject` / `credential.fill` 交由注入的处理器执行；
-//! 3. 支持向浏览器扩展主动推送 `ExtEvent`（如设定时间到期后的 `broker.revoked` 撤销事件）。
+//! 只做协议翻译：读帧 → 交注入的处理函数 → 写帧。
+//! **不含业务判断**、不落盘、不记明文；处理函数经参数注入（core 的 Transport / SessionSource
+//! 实现在 core 落地后由此处转发），本层不持有任何全局状态。
+//!
+//! 未验证：stdio 真实往返未运行（本机无 cargo）；`serve` 的纯逻辑单测已写但未运行。
 
 use std::io::{Read, Write};
 
 use super::ext_protocol::{
-    check_length, decode_length, decode_payload, encode_frame, ExtEvent, ExtProtocolError,
-    ExtRequest, ExtResponse, BRIDGE_PROTOCOL_VERSION,
+    check_length, decode_length, decode_payload, encode_frame, ExtProtocolError, ExtRequest,
+    ExtResponse,
 };
 
+/// 宿主退出原因。
 #[derive(Debug)]
 pub enum MessagingHostError {
+    /// stdio 读写失败
     Io(std::io::Error),
+    /// 帧结构不合法
     Protocol(ExtProtocolError),
 }
 
@@ -41,14 +45,16 @@ impl From<ExtProtocolError> for MessagingHostError {
     }
 }
 
-/// 逐帧处理循环（每次请求处理后顺带下发待广播的 `ExtEvent`，如 `broker.revoked`）。
-pub fn serve_with_events<R: Read, W: Write, F>(
+/// 逐帧处理循环（与 stdio 解耦，可直接用内存读写单测）。
+///
+/// 退出语义：对端关闭（EOF）视为正常退出，返回 `Ok(())`。
+pub fn serve<R: Read, W: Write, F>(
     reader: &mut R,
     writer: &mut W,
     mut handle: F,
 ) -> Result<(), MessagingHostError>
 where
-    F: FnMut(ExtRequest) -> (ExtResponse, Vec<ExtEvent>),
+    F: FnMut(ExtRequest) -> ExtResponse,
 {
     loop {
         let mut header = [0u8; 4];
@@ -62,27 +68,14 @@ where
         check_length(declared, &body)?;
 
         let request: ExtRequest = decode_payload(&body)?;
-        let (response, events) = handle(request);
+        let response = handle(request);
 
         writer.write_all(&encode_frame(&response)?)?;
-        for event in events {
-            writer.write_all(&encode_frame(&event)?)?;
-        }
         writer.flush()?;
     }
 }
 
-pub fn serve<R: Read, W: Write, F>(
-    reader: &mut R,
-    writer: &mut W,
-    mut handle: F,
-) -> Result<(), MessagingHostError>
-where
-    F: FnMut(ExtRequest) -> ExtResponse,
-{
-    serve_with_events(reader, writer, |req| (handle(req), Vec::new()))
-}
-
+/// 读取 4 字节帧头；对端在帧边界处关闭返回 `false`。
 fn read_header<R: Read>(reader: &mut R, header: &mut [u8; 4]) -> Result<bool, MessagingHostError> {
     let mut filled = 0usize;
     while filled < header.len() {
@@ -101,48 +94,27 @@ fn read_header<R: Read>(reader: &mut R, header: &mut [u8; 4]) -> Result<bool, Me
     Ok(true)
 }
 
+/// 启动 stdio 宿主（由浏览器拉起本进程后调用，见 main.rs 的参数分流）。
+///
+/// 骨架：处理函数只回「未接入 core」；任何业务动作都等 core 落地后经注入进入本处，
+/// 本函数不写业务规则。
 pub fn run_stdio() -> Result<(), MessagingHostError> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
 
-    serve(&mut reader, &mut writer, |request| match request.action.as_str() {
-        "handshake" => ExtResponse {
-            v: BRIDGE_PROTOCOL_VERSION,
-            msg_type: "response".into(),
-            id: request.id,
-            ok: true,
-            method: Some("handshake".into()),
-            error: None,
-            payload: serde_json::json!({
-                "protocol_version": BRIDGE_PROTOCOL_VERSION,
-                "host_version": env!("CARGO_PKG_VERSION"),
-            }),
-        },
-        "ping" => ExtResponse {
-            v: BRIDGE_PROTOCOL_VERSION,
-            msg_type: "response".into(),
-            id: request.id,
-            ok: true,
-            method: Some("ping".into()),
-            error: None,
-            payload: serde_json::json!({ "ok": true }),
-        },
-        _ => ExtResponse {
-            v: BRIDGE_PROTOCOL_VERSION,
-            msg_type: "response".into(),
-            id: request.id,
-            ok: false,
-            method: None,
-            error: Some("桥宿主未解锁或未授权".to_string()),
-            payload: serde_json::Value::Null,
-        },
+    serve(&mut reader, &mut writer, |request| ExtResponse {
+        id: request.id,
+        ok: false,
+        error: Some("桥骨架未接入 core".to_string()),
+        payload: serde_json::Value::Null,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    // 未验证：本机无 cargo，未运行。
     use super::*;
     use crate::bridge::ext_protocol::{encode_frame, ExtRequest};
     use serde_json::{json, Value};
@@ -150,8 +122,6 @@ mod tests {
 
     fn request(id: &str) -> ExtRequest {
         ExtRequest {
-            v: BRIDGE_PROTOCOL_VERSION,
-            msg_type: "request".into(),
             id: id.into(),
             action: "list_sessions".into(),
             payload: json!({}),
@@ -160,11 +130,8 @@ mod tests {
 
     fn echo(call: ExtRequest) -> ExtResponse {
         ExtResponse {
-            v: BRIDGE_PROTOCOL_VERSION,
-            msg_type: "response".into(),
             id: call.id,
             ok: true,
-            method: Some(call.action),
             error: None,
             payload: json!({ "echo": true }),
         }
@@ -180,6 +147,7 @@ mod tests {
         let mut output = Vec::new();
         serve(&mut reader, &mut output, echo).unwrap();
 
+        // 两帧响应：读回长度前缀解析出的两条 JSON
         let mut cursor = Cursor::new(output);
         let mut responses = Vec::new();
         loop {
@@ -197,40 +165,6 @@ mod tests {
         assert_eq!(responses[0].id, "1");
         assert_eq!(responses[1].id, "2");
         assert_eq!(responses[0].payload, json!({ "echo": true }));
-    }
-
-    #[test]
-    fn serve_with_events_emits_broker_revoked_event_frame() {
-        let mut input = Vec::new();
-        input.extend(encode_frame(&request("req-revoke")).unwrap());
-
-        let mut reader = Cursor::new(input);
-        let mut output = Vec::new();
-        serve_with_events(&mut reader, &mut output, |call| {
-            (
-                echo(call),
-                vec![ExtEvent::broker_revoked("acc-1", "2026-10-14T00:01:00Z")],
-            )
-        })
-        .unwrap();
-
-        let mut cursor = Cursor::new(output);
-        let mut header1 = [0u8; 4];
-        assert!(read_header(&mut cursor, &mut header1).unwrap());
-        let len1 = decode_length(header1).unwrap();
-        let mut body1 = vec![0u8; len1];
-        cursor.read_exact(&mut body1).unwrap();
-        let resp: ExtResponse = decode_payload(&body1).unwrap();
-        assert_eq!(resp.id, "req-revoke");
-
-        let mut header2 = [0u8; 4];
-        assert!(read_header(&mut cursor, &mut header2).unwrap());
-        let len2 = decode_length(header2).unwrap();
-        let mut body2 = vec![0u8; len2];
-        cursor.read_exact(&mut body2).unwrap();
-        let ev: ExtEvent = decode_payload(&body2).unwrap();
-        assert_eq!(ev.event, "broker.revoked");
-        assert_eq!(ev.payload["account_ref"], "acc-1");
     }
 
     #[test]
@@ -275,22 +209,23 @@ mod tests {
 
     #[test]
     fn response_payload_is_opaque_to_the_bridge() {
+        // 协议翻译层不解读 payload：任意 JSON 原样回传
         let mut input = Vec::new();
         input.extend(encode_frame(&request("9")).unwrap());
         let mut reader = Cursor::new(input);
         let mut output = Vec::new();
         serve(&mut reader, &mut output, |_call| ExtResponse {
-            v: BRIDGE_PROTOCOL_VERSION,
-            msg_type: "response".into(),
             id: "9".into(),
             ok: true,
-            method: None,
             error: None,
             payload: Value::String("opaque".into()),
         })
         .unwrap();
 
-        let declared = decode_length([output[0], output[1], output[2], output[3]]).unwrap();
+        let declared = decode_length([
+            output[0], output[1], output[2], output[3],
+        ])
+        .unwrap();
         let response: ExtResponse = decode_payload(&output[4..4 + declared]).unwrap();
         assert_eq!(response.payload, Value::String("opaque".into()));
     }

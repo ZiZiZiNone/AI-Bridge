@@ -4,6 +4,11 @@
       <h1 class="view__title">托盘图标 + 托盘菜单</h1>
       <span class="view__no">W1</span>
     </header>
+    <p class="view__hint">
+      常驻托盘；图标三态：已锁 / 就绪 / 告警。原生托盘与菜单由 Rust 侧构建
+      （src-tauri/src/ui/tray/）。本视图呈现同一份菜单清单，一致性由
+      npm run check:structure 校验；菜单点击行为经宿主交给 core，视图不做判断。
+    </p>
     <ul class="tray">
       <li v-for="item in menuItems" :key="item.id" class="tray__item">
         <span>{{ item.label }}</span>
@@ -14,6 +19,11 @@
 </template>
 
 <script setup lang="ts">
+/**
+ * W1 托盘图标 + 托盘菜单。
+ * 承载：解锁·锁定、快捷填充、库、状态清单、临时会话、审计、备份、转换器、配对、设置、退出。
+ * 权威定义在 src-tauri/src/ui/tray/menu.rs 的 MENU_ITEMS；本视图为其 UI 呈现（非 Tauri 窗口，见 PREVIEW_VIEWS）。
+ */
 interface TrayMenuItem {
   id: string;
   label: string;

@@ -1,100 +1,85 @@
 package com.aibridge.mobile.core
 
-import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import java.io.File
+import java.io.IOException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/**
- * Android 生物识别快速解锁存储（P0-2 闭环）：
- * 1. Keystore 密钥强制 `setUserAuthenticationRequired(true)` 与 `setInvalidatedByBiometricEnrollment(true)`；
- * 2. 仅当用户显式开启快速解锁（`userOptIn == true`）时才允许保存，禁止默认静默落盘。
- */
-class QuickUnlockStore(private val context: Context) {
+private const val KEYSTORE_ALIAS = "com.aibridge.mobile.quick-unlock"
+private const val CIPHER_TRANSFORMATION = "AES/GCM/NoPadding"
+private const val GCM_TAG_BITS = 128
+private const val IV_LENGTH = 12
 
-    companion object {
-        private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
-        private const val KEY_ALIAS = "aibridge_quick_unlock_v1"
-        private const val PREFS_NAME = "aibridge_quick_unlock"
-        private const val KEY_OPT_IN = "opt_in"
-        private const val KEY_CIPHERTEXT = "ciphertext"
-        private const val KEY_IV = "iv"
+/**
+ * 快速解锁（生物识别）因子的宿主存储（S1 / M-F1）。
+ *
+ * 语义：生物识别仅作解锁因子，主密码仍是唯一根；解锁成功后主口令经 Android Keystore
+ * AES-GCM 密钥包裹保存在应用私有目录（密钥不可导出、仅本设备），读取由调用方在系统
+ * 生物识别提示通过后触发（见 BiometricGate），解锁仍最终调用 core 的 `Vault.unlock`。
+ * 纪律：主口令不进 SharedPreferences / 不进日志 / 不进错误文本。
+ * 待确认：主口令的包装保存形态（本实现 = Keystore 包裹直接保存）需与 core 密钥层次设计对齐
+ *         （与 iOS QuickUnlockStore 同口径）。
+ * 实例由组合根构造并显式传递，不是单例。
+ */
+class QuickUnlockStore(private val directory: File) {
+
+    /** 首次主口令解锁成功后调用；失败不影响主口令解锁路径。 */
+    fun save(masterPassword: String) {
+        if (!directory.isDirectory && !directory.mkdirs()) throw IOException("快速解锁因子目录不可用")
+        val iv = ByteArray(IV_LENGTH).also { java.security.SecureRandom().nextBytes(it) }
+        val ciphertext = cipher(Cipher.ENCRYPT_MODE, iv).doFinal(masterPassword.toByteArray(Charsets.UTF_8))
+        File(directory, FACTOR_FILE).writeBytes(iv + ciphertext)
     }
 
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    /** 生物识别提示通过后读取主口令（随后仍须调用 core 解锁）。 */
+    fun retrieveMasterPassword(): String {
+        val file = File(directory, FACTOR_FILE)
+        if (!file.isFile) throw IOException("快速解锁因子不存在")
+        val blob = file.readBytes()
+        if (blob.size <= IV_LENGTH) throw IOException("快速解锁因子损坏")
+        val iv = blob.copyOfRange(0, IV_LENGTH)
+        val ciphertext = blob.copyOfRange(IV_LENGTH, blob.size)
+        return String(cipher(Cipher.DECRYPT_MODE, iv).doFinal(ciphertext), Charsets.UTF_8)
+    }
 
-    var isUserOptedIn: Boolean
-        get() = prefs.getBoolean(KEY_OPT_IN, false)
-        set(value) {
-            prefs.edit().putBoolean(KEY_OPT_IN, value).apply()
-            if (!value) {
-                clear()
-            }
+    /** 关闭快速解锁（S1 设置项）：删除因子，不影响主密码。 */
+    fun clear() {
+        File(directory, FACTOR_FILE).delete()
+        runCatching {
+            KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry(KEYSTORE_ALIAS)
+        }
+    }
+
+    private fun cipher(mode: Int, iv: ByteArray): Cipher =
+        Cipher.getInstance(CIPHER_TRANSFORMATION).apply {
+            init(mode, secretKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
         }
 
-    private fun getOrCreateBiometricKey(): SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        (ks.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        val spec = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+    private fun secretKey(): SecretKey {
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (keyStore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                KEYSTORE_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                // 安全模型 S1：生物识别仅作解锁因子，但因子本身必须绑定用户认证——
+                // 否则设备已解锁状态下任何能触达 Keystore 别名的路径都可解出主口令
+                // （审查报告 P0-2，对齐 iOS 的 kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly）。
+                .setUserAuthenticationRequired(true)
+                .setInvalidatedByBiometricEnrollment(true)
+                .build(),
         )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .setUserAuthenticationRequired(true)
-            .setInvalidatedByBiometricEnrollment(true)
-            .build()
-        generator.init(spec)
         return generator.generateKey()
     }
-
-    fun saveIfOptedIn(masterPassword: String, authenticatedCipher: Cipher): Boolean {
-        if (!isUserOptedIn) {
-            return false
-        }
-        val ciphertext = authenticatedCipher.doFinal(masterPassword.toByteArray(Charsets.UTF_8))
-        val iv = authenticatedCipher.iv
-        prefs.edit()
-            .putString(KEY_CIPHERTEXT, android.util.Base64.encodeToString(ciphertext, android.util.Base64.NO_WRAP))
-            .putString(KEY_IV, android.util.Base64.encodeToString(iv, android.util.Base64.NO_WRAP))
-            .apply()
-        return true
-    }
-
-    fun createEncryptCipher(): Cipher {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateBiometricKey())
-        return cipher
-    }
-
-    fun createDecryptCipher(): Cipher? {
-        if (!isUserOptedIn) return null
-        val ivBase64 = prefs.getString(KEY_IV, null) ?: return null
-        val iv = android.util.Base64.decode(ivBase64, android.util.Base64.NO_WRAP)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, getOrCreateBiometricKey(), GCMParameterSpec(128, iv))
-        return cipher
-    }
-
-    fun unlockWithAuthenticatedCipher(authenticatedCipher: Cipher): String? {
-        if (!isUserOptedIn) return null
-        val ctBase64 = prefs.getString(KEY_CIPHERTEXT, null) ?: return null
-        val ct = android.util.Base64.decode(ctBase64, android.util.Base64.NO_WRAP)
-        return String(authenticatedCipher.doFinal(ct), Charsets.UTF_8)
-    }
-
-    fun clear() {
-        prefs.edit().remove(KEY_CIPHERTEXT).remove(KEY_IV).apply()
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        if (ks.containsAlias(KEY_ALIAS)) {
-            ks.deleteEntry(KEY_ALIAS)
-        }
-    }
 }
+
+private const val FACTOR_FILE = "quick-unlock.factor"

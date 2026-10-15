@@ -116,21 +116,24 @@ def parse_req(req: str):
     return match
 
 
-def read_direct_deps():
-    """name -> list[req]（workspace 成员的依赖 + workspace.dependencies）。"""
+def read_direct_deps(extra_manifests=None):
+    """name -> list[req]（workspace 成员的依赖 + workspace.dependencies + 指定额外清单）。"""
     reqs = {}
     files = [REPO_ROOT / "Cargo.toml"]
     for p in sorted((REPO_ROOT / "core").glob("*/Cargo.toml")):
         files.append(p)
+    for p in extra_manifests or []:
+        files.append(Path(p))
     dep_line = re.compile(r'^\s*([A-Za-z0-9_-]+)\s*=\s*(?:"([^"]+)"|\{\s*version\s*=\s*"([^"]+)")')
     section = ""
+    wanted = ("[dependencies]", "[build-dependencies]", "[dev-dependencies]", "[workspace.dependencies]")
     for f in files:
         for line in f.read_text(encoding="utf-8").splitlines():
             s = line.strip()
             if s.startswith("["):
                 section = s
                 continue
-            if "[dependencies]" not in section and "[workspace.dependencies]" not in section:
+            if not any(w in section for w in wanted):
                 continue
             m = dep_line.match(line)
             if m:
@@ -265,6 +268,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cargo-home", default=str(REPO_ROOT / ".cargo-home"))
     ap.add_argument("--selftest", action="store_true", help="只跑解析器本地自测（零网络）")
+    ap.add_argument(
+        "--extra-manifest",
+        action="append",
+        default=[],
+        help="额外解析的 Cargo.toml（如独立 workspace 的 desktop/src-tauri/Cargo.toml），可重复",
+    )
+    ap.add_argument(
+        "--all-versions",
+        action="append",
+        default=[],
+        help="把指定 crate 的全部未撤回版本拉进 vendor（精确 pin 与贪心选版冲突时，交回 cargo 自行回溯选版），可重复",
+    )
     args = ap.parse_args()
     selftest()
     if args.selftest:
@@ -274,7 +289,7 @@ def main():
     vendor_dir.mkdir(parents=True, exist_ok=True)
 
     print("[1/3] 解析依赖闭包 ...")
-    reqs = read_direct_deps()
+    reqs = read_direct_deps(args.extra_manifest)
     print(f"      直接依赖 {len(reqs)} 个: {sorted(reqs)}")
     chosen = resolve(reqs)
     print(f"      闭包共 {len(chosen)} 个 crate")
@@ -283,6 +298,12 @@ def main():
     for i, (name, ver, _meta) in enumerate(chosen, 1):
         print(f"      [{i}/{len(chosen)}] {name} {ver}")
         download_and_unpack(name, ver, vendor_dir)
+
+    for name in args.all_versions:
+        versions = [m for m in load_index(name) if not m.get("yanked")]
+        print(f"      [全版本] {name}：{len(versions)} 个版本")
+        for meta in versions:
+            download_and_unpack(name, meta["vers"], vendor_dir)
 
     cfg = cargo_home / "config.toml"
     cfg.write_text(

@@ -44,7 +44,16 @@ fun sameSiteLabel(sameSite: SameSite): String = when (sameSite) {
 }
 
 /** 契约 Cookie → Set-Cookie 形态值串（`CookieManager.setCookie` 逐属性写入，零丢弃）。 */
+private fun containsControlOrDelimiter(text: String): Boolean =
+    text.any { it == '\r' || it == '\n' || it == '\u0000' || it == ';' }
+
 fun cookieHeaderValue(cookie: Cookie): String {
+    require(!containsControlOrDelimiter(cookie.name) && !cookie.name.contains('=')) {
+        "非法 cookie 名称"
+    }
+    require(!containsControlOrDelimiter(cookie.value)) {
+        "非法 cookie 值"
+    }
     val parts = mutableListOf("${cookie.name}=${cookie.value}")
     cookie.domain?.takeIf { it.isNotBlank() }?.let { parts += "Domain=$it" }
     parts += "Path=${cookie.path?.takeIf { it.isNotBlank() } ?: "/"}"

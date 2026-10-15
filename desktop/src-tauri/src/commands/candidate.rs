@@ -8,13 +8,13 @@
 //! （`ab-vault` 无检索、`ab-state` 无按域名筛选）——本层的 [`url_matches_domain`] 是
 //! 机械化占位实现，规则定稿后应下沉 core，此处只留一处实现。
 
-use ab_broker::GrantStatus;
+use ab_broker::SessionStatus;
 use ab_state::{MatrixFilters, MatrixRow};
 use serde::{Deserialize, Serialize};
 
 use super::library::EntryView;
 use super::{sessions, CmdResult};
-use crate::host::HostServices;
+use crate::host::HostState;
 
 /// 候选条数据（跟随鼠标小面板的一次取数）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +24,7 @@ pub struct CandidateData {
     /// 会话候选（账号 × 端 × 到期；无 payload）。
     pub sessions: Vec<MatrixRow>,
     /// 活跃临时授权（C5 快捷吊销入口）。
-    pub grants: Vec<GrantStatus>,
+    pub grants: Vec<SessionStatus>,
 }
 
 /// 域名匹配（B6.2 机械占位，见文件头 core 缺口）：
@@ -52,7 +52,7 @@ pub fn url_matches_domain(url: &str, domain: &str) -> bool {
 }
 
 /// 取候选（锁定态条目为空：候选条不在锁定态吐任何库内容）。
-pub fn data(services: &HostServices, domain: &str) -> CmdResult<CandidateData> {
+pub fn data(services: &HostState, domain: &str) -> CmdResult<CandidateData> {
     let entries = if super::library::is_unlocked(services) {
         super::library::list_entries(services)?
             .into_iter()
@@ -86,7 +86,7 @@ pub fn data(services: &HostServices, domain: &str) -> CmdResult<CandidateData> {
 
 #[tauri::command]
 pub fn candidate_data(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     domain: String,
 ) -> CmdResult<CandidateData> {
     data(&state, &domain)
@@ -97,7 +97,7 @@ mod tests {
     use super::*;
     use crate::commands::library;
     use crate::commands::state::{self, EndpointDto};
-    use crate::host::{HostPaths, HostServices, OfficialVerifier};
+    use crate::host::{HostLayout, HostState, HostSignatureVerifier};
     use ab_audit::InMemoryAuditSink;
     use ab_contract::{
         Cookie, CredentialKind, Payload, SameSite, SessionKind, SessionRecord, Source, SourceType,
@@ -106,17 +106,13 @@ mod tests {
     use ab_state::{Endpoint, EndpointKind};
     use std::sync::Arc;
 
-    fn test_services() -> HostServices {
-        let root = std::env::temp_dir().join(format!(
-            "aibridge-candidate-test-{}-{}",
-            std::process::id(),
-            crate::commands::now_unix_secs()
-        ));
+    fn test_services() -> HostState {
+        let root = crate::host::test_root("aibridge-candidate-test");
         let _ = std::fs::remove_dir_all(&root);
-        HostServices::build_with(
+        HostState::build_with(
             "pc-test",
-            HostPaths { root },
-            OfficialVerifier::new(None, None),
+            HostLayout { root },
+            HostSignatureVerifier::new(None, None),
             Arc::new(InMemoryAuditSink::new()),
         )
     }

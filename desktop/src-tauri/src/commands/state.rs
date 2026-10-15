@@ -12,7 +12,7 @@ use ab_state::{
 use serde::{Deserialize, Serialize};
 
 use super::{record, CmdResult};
-use crate::host::HostServices;
+use crate::host::HostState;
 
 /// 端标识入参（命令面搬运）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ impl From<&EndpointDto> for Endpoint {
 }
 
 /// A2.1/A2.3 会话矩阵（账号 × 端 × 来源 × 到期，可筛选）。
-pub fn matrix(services: &HostServices, filters: MatrixFilters) -> CmdResult<Vec<MatrixRow>> {
+pub fn matrix(services: &HostState, filters: MatrixFilters) -> CmdResult<Vec<MatrixRow>> {
     services
         .state
         .matrix(&filters)
@@ -36,12 +36,12 @@ pub fn matrix(services: &HostServices, filters: MatrixFilters) -> CmdResult<Vec<
 }
 
 /// A3.1 会话健康（到期倒计时与分级）。
-pub fn health(services: &HostServices) -> CmdResult<HealthReport> {
+pub fn health(services: &HostState) -> CmdResult<HealthReport> {
     services.state.health().map_err(|error| error.to_string())
 }
 
 /// A7.2 快照列表（最新在前）。
-pub fn snapshots(services: &HostServices) -> CmdResult<Vec<SnapshotMeta>> {
+pub fn snapshots(services: &HostState) -> CmdResult<Vec<SnapshotMeta>> {
     services
         .state
         .list_snapshots()
@@ -49,7 +49,7 @@ pub fn snapshots(services: &HostServices) -> CmdResult<Vec<SnapshotMeta>> {
 }
 
 /// A7.2 一键回滚（写账 fail-closed）。
-pub fn rollback(services: &HostServices, snapshot_id: &str) -> CmdResult<RollbackReport> {
+pub fn rollback(services: &HostState, snapshot_id: &str) -> CmdResult<RollbackReport> {
     let report = services
         .state
         .rollback(snapshot_id)
@@ -69,7 +69,7 @@ pub fn rollback(services: &HostServices, snapshot_id: &str) -> CmdResult<Rollbac
 }
 
 /// A7.1 覆盖前快照 + 捕获某端会话（会话来自 `SessionSource` 注入面）。
-pub fn capture(services: &HostServices, endpoint: &EndpointDto) -> CmdResult<CaptureReport> {
+pub fn capture(services: &HostState, endpoint: &EndpointDto) -> CmdResult<CaptureReport> {
     let endpoint = Endpoint::from(endpoint);
     let report = services
         .state
@@ -90,25 +90,25 @@ pub fn capture(services: &HostServices, endpoint: &EndpointDto) -> CmdResult<Cap
 
 #[tauri::command]
 pub fn state_matrix(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     filters: MatrixFilters,
 ) -> CmdResult<Vec<MatrixRow>> {
     matrix(&state, filters)
 }
 
 #[tauri::command]
-pub fn state_health(state: tauri::State<'_, HostServices>) -> CmdResult<HealthReport> {
+pub fn state_health(state: tauri::State<'_, HostState>) -> CmdResult<HealthReport> {
     health(&state)
 }
 
 #[tauri::command]
-pub fn state_snapshots(state: tauri::State<'_, HostServices>) -> CmdResult<Vec<SnapshotMeta>> {
+pub fn state_snapshots(state: tauri::State<'_, HostState>) -> CmdResult<Vec<SnapshotMeta>> {
     snapshots(&state)
 }
 
 #[tauri::command]
 pub fn state_rollback(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     snapshot_id: String,
 ) -> CmdResult<RollbackReport> {
     rollback(&state, &snapshot_id)
@@ -116,7 +116,7 @@ pub fn state_rollback(
 
 #[tauri::command]
 pub fn state_capture(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     endpoint: EndpointDto,
 ) -> CmdResult<CaptureReport> {
     capture(&state, &endpoint)
@@ -125,7 +125,7 @@ pub fn state_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{HostPaths, HostServices, OfficialVerifier};
+    use crate::host::{HostLayout, HostState, HostSignatureVerifier};
     use ab_audit::{AuditFilter, InMemoryAuditSink};
     use ab_contract::{
         Cookie, Payload, SameSite, SessionKind, SessionRecord, Source, SourceType, Target,
@@ -133,17 +133,13 @@ mod tests {
     };
     use std::sync::Arc;
 
-    fn test_services() -> HostServices {
-        let root = std::env::temp_dir().join(format!(
-            "aibridge-state-test-{}-{}",
-            std::process::id(),
-            crate::commands::now_unix_secs()
-        ));
+    fn test_services() -> HostState {
+        let root = crate::host::test_root("aibridge-state-test");
         let _ = std::fs::remove_dir_all(&root);
-        HostServices::build_with(
+        HostState::build_with(
             "pc-test",
-            HostPaths { root },
-            OfficialVerifier::new(None, None),
+            HostLayout { root },
+            HostSignatureVerifier::new(None, None),
             Arc::new(InMemoryAuditSink::new()),
         )
     }

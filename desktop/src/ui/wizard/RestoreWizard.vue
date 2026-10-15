@@ -1,6 +1,10 @@
 <template>
   <WindowShell title="恢复向导" no="W13">
     <div class="view">
+      <p class="view__hint">
+        一次性窗口（用完即焚）。A6.9 从加密备份或 A8 离线传送包恢复；
+        A8.3 导入时校验签名时间戳，过期包一律拒解。
+      </p>
       <ol class="steps">
         <li v-for="(step, index) in steps" :key="step" :class="{ 'steps__item--active': index === stepIndex }">
           {{ step }}
@@ -21,6 +25,11 @@ import { computed, ref } from 'vue';
 import WindowShell from '../components/WindowShell.vue';
 import { useWindowControls } from '../../hooks/useWindowControls';
 
+/**
+ * W13 恢复向导（一次性窗口）。
+ * 承载：A6.9 恢复 / 导入、A8.3 过期拒解。
+ * 解密、时间戳校验、完整性比对全部在 core；UI 只呈现步骤与结果。
+ */
 const steps: readonly string[] = [
   '选择备份文件 / 离线传送包',
   '输入恢复密钥（本机加密副本）',

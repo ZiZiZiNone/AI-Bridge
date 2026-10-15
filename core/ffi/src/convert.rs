@@ -662,13 +662,13 @@ impl From<&state::SnapshotMeta> for SnapshotSummary {
     }
 }
 
-impl From<&broker::GrantStatus> for IssuedSession {
-    fn from(v: &broker::GrantStatus) -> Self {
+impl From<&broker::SessionStatus> for IssuedSession {
+    fn from(v: &broker::SessionStatus) -> Self {
         IssuedSession {
             session_id: v.session_id.clone(),
             account_ref: v.account_ref.clone(),
             expires_at: v.expires_at.clone(),
-            revoked: v.state == broker::GrantState::Revoked,
+            revoked: v.state == broker::SessionState::Revoked,
         }
     }
 }

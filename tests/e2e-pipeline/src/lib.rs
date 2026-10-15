@@ -23,7 +23,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use ab_audit::{AuditAction, AuditFilter, AuditResult, AuditSink, InMemoryAuditSink};
-    use ab_broker::{BrokerService, UseAction, UseRequest};
+    use ab_broker::{SessionBroker, SessionAction, SessionUse};
     use ab_contract::time::format_rfc3339_secs;
     use ab_contract::{
         ClientEnv, Cookie, CredentialKind, Payload, PlainCredential, SameSite, SCHEMA_VERSION,
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn flow3_ai_temp_session_acquire_list_renew_release_chain() {
         let audit = Arc::new(InMemoryAuditSink::new());
-        let broker = Arc::new(BrokerService::new(audit.clone(), &MASTER).unwrap());
+        let broker = Arc::new(SessionBroker::new(audit.clone(), &MASTER).unwrap());
         let state = state_service(
             vec![SessionEntry::new(
                 Endpoint::new(EndpointKind::Browser, "chromium"),
@@ -364,10 +364,10 @@ mod tests {
         let permit = broker
             .authorize(
                 "fixture-ai-client",
-                UseRequest {
+                SessionUse {
                     handle: &grant.handle,
                     domain: Some("example.test"),
-                    action: UseAction::Read,
+                    action: SessionAction::Read,
                 },
                 NOW + 10,
             )
@@ -405,10 +405,10 @@ mod tests {
             broker
                 .authorize(
                     "fixture-ai-client",
-                    UseRequest {
+                    SessionUse {
                         handle: &grant.handle,
                         domain: Some("example.test"),
-                        action: UseAction::Read,
+                        action: SessionAction::Read,
                     },
                     NOW + 20,
                 )

@@ -75,6 +75,38 @@ impl MenuItem {
             _ => None,
         }
     }
+
+    /// 菜单点击动作（机械映射，不含业务判断）。
+    pub fn action(self) -> MenuAction {
+        if let Some(label) = self.window_label() {
+            return MenuAction::OpenWindow(label);
+        }
+        match self.id {
+            "quick-fill" => MenuAction::SummonCandidate,
+            "unlock-lock" => MenuAction::ToggleLock,
+            "quit" => MenuAction::Quit,
+            _ => MenuAction::None,
+        }
+    }
+}
+
+/// 托盘菜单动作（三类 + 无动作）：打开窗口 / 唤起候选条 / 切会话态 / 退出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    OpenWindow(&'static str),
+    SummonCandidate,
+    ToggleLock,
+    Quit,
+    None,
+}
+
+/// 按菜单 id 查动作（未知 id = 无动作，不 panic）。
+pub fn action_of(id: &str) -> MenuAction {
+    MENU_ITEMS
+        .iter()
+        .find(|item| item.id == id)
+        .map(|item| item.action())
+        .unwrap_or(MenuAction::None)
 }
 
 #[cfg(test)]
@@ -106,5 +138,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_menu_item_maps_to_an_action() {
+        assert_eq!(action_of("library"), MenuAction::OpenWindow("panel-library"));
+        assert_eq!(action_of("quick-fill"), MenuAction::SummonCandidate);
+        assert_eq!(action_of("unlock-lock"), MenuAction::ToggleLock);
+        assert_eq!(action_of("quit"), MenuAction::Quit);
+        assert_eq!(action_of("does-not-exist"), MenuAction::None);
     }
 }

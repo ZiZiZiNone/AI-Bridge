@@ -12,7 +12,7 @@ use ab_vault::{Entry, RecoveryKey, VaultSession};
 use serde::{Deserialize, Serialize};
 
 use super::{record, CmdResult};
-use crate::host::HostServices;
+use crate::host::HostState;
 
 /// 条目列表行（W3 列表用）：**不含秘密字段**（S6：秘密不经过非必要通道）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,13 +145,13 @@ pub fn uuid_from_hex(text: &str) -> CmdResult<[u8; 16]> {
 }
 
 /// 就绪态判定（托盘三态驱动源之一；S2 的自动锁策略待 core，见 README）。
-pub fn is_unlocked(services: &HostServices) -> bool {
+pub fn is_unlocked(services: &HostState) -> bool {
     services.vault.lock().map(|session| session.is_some()).unwrap_or(false)
 }
 
 /// 在就绪态上执行一段库操作；未解锁一律报错（不猜、不自动解锁）。
 fn with_vault<T>(
-    services: &HostServices,
+    services: &HostState,
     operation: impl FnOnce(&mut VaultSession) -> CmdResult<T>,
 ) -> CmdResult<T> {
     let mut guard = services
@@ -165,7 +165,7 @@ fn with_vault<T>(
 }
 
 /// 保存活动库（DPAPI 外壳）+ 审计馈给（fail-closed）。
-fn save_and_audit(services: &HostServices, session: &VaultSession) -> CmdResult<()> {
+fn save_and_audit(services: &HostState, session: &VaultSession) -> CmdResult<()> {
     session
         .save(&mut services.vault_store(), &services.entropy)
         .map_err(|error| error.to_string())?;
@@ -182,7 +182,7 @@ fn save_and_audit(services: &HostServices, session: &VaultSession) -> CmdResult<
 /* ---------------- 纯函数（命令 → core 的全部路径） ---------------- */
 
 /// W11 建库（A1 + S1 + S3）：创建库 → 活动库落盘 → 生成恢复密钥并 DPAPI 封装保存。
-pub fn create(services: &HostServices, name: &str, password: &str) -> CmdResult<InitView> {
+pub fn create(services: &HostState, name: &str, password: &str) -> CmdResult<InitView> {
     if services.vault_store().load().map_err(|e| e.to_string())?.is_some() {
         return Err("库已存在，改用解锁".into());
     }
@@ -224,7 +224,7 @@ pub fn create(services: &HostServices, name: &str, password: &str) -> CmdResult<
 }
 
 /// S1 解锁：core 校验口令 → 审计（fail-closed）→ 进入就绪态。
-pub fn unlock(services: &HostServices, password: &str) -> CmdResult<()> {
+pub fn unlock(services: &HostState, password: &str) -> CmdResult<()> {
     let session = match VaultSession::unlock(&mut services.vault_store(), password.as_bytes()) {
         Ok(session) => session,
         Err(error) => {
@@ -254,7 +254,7 @@ pub fn unlock(services: &HostServices, password: &str) -> CmdResult<()> {
 }
 
 /// S7 锁定：清就绪态（明文随 `VaultSession` Drop 清零）+ 审计。
-pub fn lock(services: &HostServices) -> CmdResult<()> {
+pub fn lock(services: &HostState) -> CmdResult<()> {
     let mut guard = services
         .vault
         .lock()
@@ -275,21 +275,21 @@ pub fn lock(services: &HostServices) -> CmdResult<()> {
 }
 
 /// A1.1 条目列表（无秘密字段）。
-pub fn list_entries(services: &HostServices) -> CmdResult<Vec<EntryView>> {
+pub fn list_entries(services: &HostState) -> CmdResult<Vec<EntryView>> {
     with_vault(services, |session| {
         Ok(session.vault.entries().iter().map(|entry| to_view(entry)).collect())
     })
 }
 
 /// A1.5 回收站列表。
-pub fn list_trash(services: &HostServices) -> CmdResult<Vec<EntryView>> {
+pub fn list_trash(services: &HostState) -> CmdResult<Vec<EntryView>> {
     with_vault(services, |session| {
         Ok(session.vault.trash_entries().iter().map(to_view).collect())
     })
 }
 
 /// A1.1 条目明细（含秘密，编辑 / 填充用）。
-pub fn get_entry(services: &HostServices, uuid: &str) -> CmdResult<EntryDetail> {
+pub fn get_entry(services: &HostState, uuid: &str) -> CmdResult<EntryDetail> {
     let uuid = uuid_from_hex(uuid)?;
     with_vault(services, |session| {
         session
@@ -301,7 +301,7 @@ pub fn get_entry(services: &HostServices, uuid: &str) -> CmdResult<EntryDetail> 
 }
 
 /// A1.1 新建条目（全字段含自定义字段）。
-pub fn add_entry(services: &HostServices, input: EntryInput) -> CmdResult<EntryView> {
+pub fn add_entry(services: &HostState, input: EntryInput) -> CmdResult<EntryView> {
     with_vault(services, |session| {
         let mut entry = Entry::new(
             &input.title,
@@ -320,7 +320,7 @@ pub fn add_entry(services: &HostServices, input: EntryInput) -> CmdResult<EntryV
 
 /// A1.1 编辑条目。
 pub fn update_entry(
-    services: &HostServices,
+    services: &HostState,
     uuid: &str,
     input: EntryInput,
 ) -> CmdResult<EntryView> {
@@ -340,7 +340,7 @@ pub fn update_entry(
 }
 
 /// A1.5 软删除入回收站。
-pub fn trash_entry(services: &HostServices, uuid: &str) -> CmdResult<()> {
+pub fn trash_entry(services: &HostState, uuid: &str) -> CmdResult<()> {
     let uuid = uuid_from_hex(uuid)?;
     with_vault(services, |session| {
         session.vault.trash(uuid).map_err(|error| error.to_string())?;
@@ -349,7 +349,7 @@ pub fn trash_entry(services: &HostServices, uuid: &str) -> CmdResult<()> {
 }
 
 /// A1.5 从回收站恢复。
-pub fn restore_entry(services: &HostServices, uuid: &str) -> CmdResult<()> {
+pub fn restore_entry(services: &HostState, uuid: &str) -> CmdResult<()> {
     let uuid = uuid_from_hex(uuid)?;
     with_vault(services, |session| {
         session.vault.restore(uuid).map_err(|error| error.to_string())?;
@@ -358,7 +358,7 @@ pub fn restore_entry(services: &HostServices, uuid: &str) -> CmdResult<()> {
 }
 
 /// A1.5 彻底删除（清空回收站）。
-pub fn purge_trash(services: &HostServices) -> CmdResult<()> {
+pub fn purge_trash(services: &HostState) -> CmdResult<()> {
     with_vault(services, |session| {
         session.vault.purge_trash();
         save_and_audit(services, session)
@@ -366,7 +366,7 @@ pub fn purge_trash(services: &HostServices) -> CmdResult<()> {
 }
 
 /// 供恢复路径替换就绪态（A6.9 / A8.3 恢复后进入就绪态）。
-pub fn adopt_session(services: &HostServices, session: VaultSession) -> CmdResult<()> {
+pub fn adopt_session(services: &HostState, session: VaultSession) -> CmdResult<()> {
     session
         .save(&mut services.vault_store(), &services.entropy)
         .map_err(|error| error.to_string())?;
@@ -386,7 +386,7 @@ pub fn adopt_session(services: &HostServices, session: VaultSession) -> CmdResul
 
 #[tauri::command]
 pub fn vault_create(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     name: String,
     password: String,
 ) -> CmdResult<InitView> {
@@ -394,38 +394,38 @@ pub fn vault_create(
 }
 
 #[tauri::command]
-pub fn vault_unlock(state: tauri::State<'_, HostServices>, password: String) -> CmdResult<()> {
+pub fn vault_unlock(state: tauri::State<'_, HostState>, password: String) -> CmdResult<()> {
     unlock(&state, &password)
 }
 
 #[tauri::command]
-pub fn vault_lock(state: tauri::State<'_, HostServices>) -> CmdResult<()> {
+pub fn vault_lock(state: tauri::State<'_, HostState>) -> CmdResult<()> {
     lock(&state)
 }
 
 #[tauri::command]
-pub fn vault_is_unlocked(state: tauri::State<'_, HostServices>) -> bool {
+pub fn vault_is_unlocked(state: tauri::State<'_, HostState>) -> bool {
     is_unlocked(&state)
 }
 
 #[tauri::command]
-pub fn vault_list_entries(state: tauri::State<'_, HostServices>) -> CmdResult<Vec<EntryView>> {
+pub fn vault_list_entries(state: tauri::State<'_, HostState>) -> CmdResult<Vec<EntryView>> {
     list_entries(&state)
 }
 
 #[tauri::command]
-pub fn vault_list_trash(state: tauri::State<'_, HostServices>) -> CmdResult<Vec<EntryView>> {
+pub fn vault_list_trash(state: tauri::State<'_, HostState>) -> CmdResult<Vec<EntryView>> {
     list_trash(&state)
 }
 
 #[tauri::command]
-pub fn vault_get_entry(state: tauri::State<'_, HostServices>, uuid: String) -> CmdResult<EntryDetail> {
+pub fn vault_get_entry(state: tauri::State<'_, HostState>, uuid: String) -> CmdResult<EntryDetail> {
     get_entry(&state, &uuid)
 }
 
 #[tauri::command]
 pub fn vault_add_entry(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     input: EntryInput,
 ) -> CmdResult<EntryView> {
     add_entry(&state, input)
@@ -433,7 +433,7 @@ pub fn vault_add_entry(
 
 #[tauri::command]
 pub fn vault_update_entry(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     uuid: String,
     input: EntryInput,
 ) -> CmdResult<EntryView> {
@@ -441,24 +441,24 @@ pub fn vault_update_entry(
 }
 
 #[tauri::command]
-pub fn vault_trash_entry(state: tauri::State<'_, HostServices>, uuid: String) -> CmdResult<()> {
+pub fn vault_trash_entry(state: tauri::State<'_, HostState>, uuid: String) -> CmdResult<()> {
     trash_entry(&state, &uuid)
 }
 
 #[tauri::command]
-pub fn vault_restore_entry(state: tauri::State<'_, HostServices>, uuid: String) -> CmdResult<()> {
+pub fn vault_restore_entry(state: tauri::State<'_, HostState>, uuid: String) -> CmdResult<()> {
     restore_entry(&state, &uuid)
 }
 
 #[tauri::command]
-pub fn vault_purge_trash(state: tauri::State<'_, HostServices>) -> CmdResult<()> {
+pub fn vault_purge_trash(state: tauri::State<'_, HostState>) -> CmdResult<()> {
     purge_trash(&state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{HostPaths, HostServices, OfficialVerifier};
+    use crate::host::{HostLayout, HostState, HostSignatureVerifier};
     use ab_audit::{AuditFilter, AuditSink, InMemoryAuditSink};
     use std::sync::Arc;
 
@@ -487,25 +487,21 @@ mod tests {
     }
 
     fn test_root() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "aibridge-cmd-test-{}-{}",
-            std::process::id(),
-            super::super::now_unix_secs()
-        ))
+        crate::host::test_root("aibridge-cmd-test")
     }
 
-    fn test_services_at(root: &std::path::Path, audit: Arc<dyn AuditSink>) -> HostServices {
-        HostServices::build_with(
+    fn test_services_at(root: &std::path::Path, audit: Arc<dyn AuditSink>) -> HostState {
+        HostState::build_with(
             "pc-test",
-            HostPaths {
+            HostLayout {
                 root: root.to_path_buf(),
             },
-            OfficialVerifier::new(None, None),
+            HostSignatureVerifier::new(None, None),
             audit,
         )
     }
 
-    fn test_services() -> HostServices {
+    fn test_services() -> HostState {
         let root = test_root();
         let _ = std::fs::remove_dir_all(&root);
         test_services_at(&root, Arc::new(InMemoryAuditSink::new()))

@@ -1,16 +1,31 @@
-//! 窗口管理：窗口清单（唯一事实源）+ 打开 / 隐藏 / 销毁 / 切换。
+//! 窗口管理骨架：窗口清单（唯一事实源）+ 打开 / 隐藏 / 销毁 / 切换。
+//!
+//! 契约：
+//! - 每个 Tauri 窗口的 `label` 与 `desktop/src/ui/window-registry.ts` 的 `WINDOW_VIEWS` 键一一对应；
+//! - 窗口只加载 `index.html?window=<label>`，由标签决定挂载哪个视图（薄入口）；
+//! - 尺寸 / 形态只在本文件声明，前端不重复声明（同一规则全仓只写一份）；
+//! - 面板「用完即关」（隐藏保留 WebView），向导「用完即焚」（销毁）。
+//!
+//! 未验证：本机无 cargo 工具链，Tauri 2 API 形态（WebviewWindowBuilder 链式调用）未经编译验证。
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
+/// 候选条窗口 label（热键唤起，见 ui::candidate）。
 pub const CANDIDATE_LABEL: &str = "candidate";
+/// 面板窗口 label 前缀（W3–W10）。
 pub const PANEL_PREFIX: &str = "panel-";
+/// 向导窗口 label 前缀（W11–W14）。
 pub const WIZARD_PREFIX: &str = "wizard-";
 
+/// 单个窗口的声明（纯数据，便于单测与前端登记表比对）。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct WindowSpec {
+    /// 功能点全景 §3.1 的界面编号（W2–W14）
     pub w: &'static str,
+    /// Tauri 窗口 label，同时决定前端挂载哪个视图
     pub label: &'static str,
+    /// 窗口标题（显示名一律 AI-Bridge）
     pub title: &'static str,
     pub width: f64,
     pub height: f64,
@@ -21,6 +36,7 @@ pub struct WindowSpec {
 }
 
 /// 窗口清单（唯一事实源）：13 个窗口 = 候选条 1（W2）+ 面板 8（W3–W10）+ 向导 4（W11–W14）。
+/// 托盘（W1）与通知（W15）不是窗口，故不在本表（见 ui::tray）。
 pub const WINDOW_SPECS: &[WindowSpec] = &[
     WindowSpec {
         w: "W2",
@@ -167,10 +183,12 @@ pub const WINDOW_SPECS: &[WindowSpec] = &[
     },
 ];
 
+/// 按 label 取窗口声明；未声明返回 None（调用方负责转成错误，不 panic）。
 pub fn find(label: &str) -> Option<&'static WindowSpec> {
     WINDOW_SPECS.iter().find(|spec| spec.label == label)
 }
 
+/// 打开窗口；已存在则前置（不重复创建）。
 pub fn ensure_open(app: &AppHandle, label: &str) -> Result<(), String> {
     let spec = find(label).ok_or_else(|| format!("未声明的窗口标签：{label}"))?;
 
@@ -183,6 +201,7 @@ pub fn ensure_open(app: &AppHandle, label: &str) -> Result<(), String> {
     build(app, spec)
 }
 
+/// 隐藏窗口（面板「用完即关」：隐藏保留 WebView，下次打开更快）。
 pub fn hide(app: &AppHandle, label: &str) -> Result<(), String> {
     let window = app
         .get_webview_window(label)
@@ -190,6 +209,7 @@ pub fn hide(app: &AppHandle, label: &str) -> Result<(), String> {
     window.hide().map_err(|error| error.to_string())
 }
 
+/// 销毁窗口（向导「用完即焚」）。窗口不存在视为已完成。
 pub fn destroy(app: &AppHandle, label: &str) -> Result<(), String> {
     match app.get_webview_window(label) {
         Some(window) => window.destroy().map_err(|error| error.to_string()),
@@ -197,6 +217,7 @@ pub fn destroy(app: &AppHandle, label: &str) -> Result<(), String> {
     }
 }
 
+/// 切换显示（候选条热键 B6.1 用）。
 pub fn toggle(app: &AppHandle, label: &str) -> Result<(), String> {
     match app.get_webview_window(label) {
         Some(window) => {
@@ -211,6 +232,7 @@ pub fn toggle(app: &AppHandle, label: &str) -> Result<(), String> {
     }
 }
 
+/// 真正创建窗口：URL 里带 label，前端据此挂载视图（见 src/ui/window-registry.ts）。
 fn build(app: &AppHandle, spec: &WindowSpec) -> Result<(), String> {
     let url = WebviewUrl::App(format!("index.html?window={}", spec.label).into());
 
@@ -227,19 +249,16 @@ fn build(app: &AppHandle, spec: &WindowSpec) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/* ---------------- tauri commands：UI → 宿主（结构化数据进出，无业务规则） ---------------- */
+
 #[tauri::command]
 pub fn open_window(app: AppHandle, label: String) -> Result<(), String> {
     ensure_open(&app, &label)
 }
 
-/// 关闭窗口：向导（`wizard-*`）一次性销毁，面板与候选条隐藏保留实例。
 #[tauri::command]
 pub fn close_window(app: AppHandle, label: String) -> Result<(), String> {
-    if label.starts_with(WIZARD_PREFIX) {
-        destroy(&app, &label)
-    } else {
-        hide(&app, &label)
-    }
+    destroy(&app, &label)
 }
 
 #[tauri::command]
@@ -249,6 +268,8 @@ pub fn toggle_window(app: AppHandle, label: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    // 窗口清单是纯数据：不启任何宿主即可校验（极致解耦判据：搬进单测不改内部代码）。
+    // 未验证：本机无 cargo，未运行。
     use super::*;
 
     #[test]

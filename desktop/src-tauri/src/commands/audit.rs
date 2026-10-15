@@ -6,10 +6,10 @@
 use ab_audit::AuditEvent;
 
 use super::{AuditFilterDto, CmdResult};
-use crate::host::HostServices;
+use crate::host::HostState;
 
 /// C3.1/C3.2 查询（筛选字段精确匹配；`None` = 不限）。
-pub fn query(services: &HostServices, filter: &AuditFilterDto) -> CmdResult<Vec<AuditEvent>> {
+pub fn query(services: &HostState, filter: &AuditFilterDto) -> CmdResult<Vec<AuditEvent>> {
     services
         .audit
         .query(&filter.into())
@@ -17,7 +17,7 @@ pub fn query(services: &HostServices, filter: &AuditFilterDto) -> CmdResult<Vec<
 }
 
 /// 已入账条数（W6 计数展示）。
-pub fn count(services: &HostServices) -> CmdResult<usize> {
+pub fn count(services: &HostState) -> CmdResult<usize> {
     services.audit.count().map_err(|error| error.to_string())
 }
 
@@ -25,14 +25,14 @@ pub fn count(services: &HostServices) -> CmdResult<usize> {
 
 #[tauri::command]
 pub fn audit_query(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     filter: AuditFilterDto,
 ) -> CmdResult<Vec<AuditEvent>> {
     query(&state, &filter)
 }
 
 #[tauri::command]
-pub fn audit_count(state: tauri::State<'_, HostServices>) -> CmdResult<usize> {
+pub fn audit_count(state: tauri::State<'_, HostState>) -> CmdResult<usize> {
     count(&state)
 }
 
@@ -40,22 +40,18 @@ pub fn audit_count(state: tauri::State<'_, HostServices>) -> CmdResult<usize> {
 mod tests {
     use super::*;
     use crate::commands::library;
-    use crate::host::{HostPaths, HostServices, OfficialVerifier};
+    use crate::host::{HostLayout, HostState, HostSignatureVerifier};
     use ab_audit::{AuditAction, InMemoryAuditSink};
     use std::sync::Arc;
 
     #[test]
     fn query_forwards_filter_to_core_sink() {
-        let root = std::env::temp_dir().join(format!(
-            "aibridge-audit-test-{}-{}",
-            std::process::id(),
-            crate::commands::now_unix_secs()
-        ));
+        let root = crate::host::test_root("aibridge-audit-test");
         let _ = std::fs::remove_dir_all(&root);
-        let services = HostServices::build_with(
+        let services = HostState::build_with(
             "pc-test",
-            HostPaths { root },
-            OfficialVerifier::new(None, None),
+            HostLayout { root },
+            HostSignatureVerifier::new(None, None),
             Arc::new(InMemoryAuditSink::new()),
         );
 

@@ -5,7 +5,7 @@
 //!
 //! 待确认 / core 缺口（见 README）：
 //! - 局域网直传信道（`Transport`）：设备地址发现与信道形态 docs/ 未定稿，宿主注入
-//!   [`crate::host::PendingTransport`]（明确失败桩），单测注入记录型假实现验证 core 路径；
+//!   [`crate::host::UnconfiguredTransport`]（明确失败桩），单测注入记录型假实现验证 core 路径；
 //! - `SessionEntry → SessionEnvelope` 归一化：ab-mcp 内部私有（`to_envelope` / `pick_session`），
 //!   core 无公开 API —— 本层 [`envelope_of`] 是唯一一处机械映射（同规则不写第二份），
 //!   规则定稿后应下沉 core。
@@ -19,7 +19,7 @@ use ab_sync::{OfflinePack, PairedDevice, PairingOffer, Transport};
 use serde::{Deserialize, Serialize};
 
 use super::{now_rfc3339, now_unix_secs, record, CmdResult};
-use crate::host::{device_id, device_platform, HostServices, PendingTransport};
+use crate::host::{device_id, device_platform, HostState, UnconfiguredTransport};
 
 /// 配对载荷（QR 内容 + 展示字段）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ pub struct ImportView {
 }
 
 /// 生成配对载荷（E3：X25519 公钥入码）。
-pub fn offer(services: &HostServices, device_name: &str) -> CmdResult<OfferView> {
+pub fn offer(services: &HostState, device_name: &str) -> CmdResult<OfferView> {
     let offer = services
         .sync
         .identity()
@@ -63,7 +63,7 @@ pub fn offer(services: &HostServices, device_name: &str) -> CmdResult<OfferView>
 }
 
 /// 扫码后候选设备（含指纹，供双方比对；**未确认不入列表**）。
-pub fn review(services: &HostServices, offer_json: &str) -> CmdResult<PairedDevice> {
+pub fn review(services: &HostState, offer_json: &str) -> CmdResult<PairedDevice> {
     let offer: PairingOffer =
         serde_json::from_str(offer_json).map_err(|error| error.to_string())?;
     services
@@ -73,7 +73,7 @@ pub fn review(services: &HostServices, offer_json: &str) -> CmdResult<PairedDevi
 }
 
 /// 指纹确认（E3 指纹确认屏：一致才确认）→ 认设备 + 落盘 + 审计（fail-closed）。
-pub fn confirm(services: &HostServices, device: PairedDevice) -> CmdResult<()> {
+pub fn confirm(services: &HostState, device: PairedDevice) -> CmdResult<()> {
     services
         .sync
         .confirm_pairing(&device)
@@ -90,12 +90,12 @@ pub fn confirm(services: &HostServices, device: PairedDevice) -> CmdResult<()> {
 }
 
 /// 设备列表（E3）。
-pub fn devices(services: &HostServices) -> CmdResult<Vec<PairedDevice>> {
+pub fn devices(services: &HostState) -> CmdResult<Vec<PairedDevice>> {
     services.sync.devices().map_err(|error| error.to_string())
 }
 
 /// 解绑（E3）。
-pub fn unbind(services: &HostServices, device_id: &str) -> CmdResult<PairedDevice> {
+pub fn unbind(services: &HostState, device_id: &str) -> CmdResult<PairedDevice> {
     let device = services
         .sync
         .unbind(device_id)
@@ -113,10 +113,10 @@ pub fn unbind(services: &HostServices, device_id: &str) -> CmdResult<PairedDevic
 }
 
 /// E1/E2 扩散直传（真会话 → 信封 → 配对密钥密封 → 注入信道）。
-/// 信道 = [`PendingTransport`]（待确认：局域网信道未定稿，见文件头）；
+/// 信道 = [`UnconfiguredTransport`]（待确认：局域网信道未定稿，见文件头）；
 /// core 密封路径由 `transfer_with` 的单测以假信道验证。
-pub fn transfer(services: &HostServices, to_device_id: &str, pick: &SessionPick) -> CmdResult<()> {
-    transfer_with(services, &PendingTransport, to_device_id, pick)?;
+pub fn transfer(services: &HostState, to_device_id: &str, pick: &SessionPick) -> CmdResult<()> {
+    transfer_with(services, &UnconfiguredTransport, to_device_id, pick)?;
     record(
         services,
         AuditAction::Sync,
@@ -129,7 +129,7 @@ pub fn transfer(services: &HostServices, to_device_id: &str, pick: &SessionPick)
 
 /// 直传（信道注入）：core `ab-sync` 的唯一入口，`transfer` 与单测共用同一路径。
 pub fn transfer_with<T: Transport>(
-    services: &HostServices,
+    services: &HostState,
     transport: &T,
     to_device_id: &str,
     pick: &SessionPick,
@@ -143,7 +143,7 @@ pub fn transfer_with<T: Transport>(
 
 /// A8.1 导出离线传送包（对端公钥加密 + 签名时间戳）。
 pub fn export_pack(
-    services: &HostServices,
+    services: &HostState,
     to_device_id: &str,
     pick: &SessionPick,
     validity_secs: u64,
@@ -171,7 +171,7 @@ pub fn export_pack(
 }
 
 /// A8.3 导入离线传送包（过期拒解在 ab-sync 强制）→ 归入本机会话清单。
-pub fn import_pack(services: &HostServices, pack_bytes: &[u8]) -> CmdResult<ImportView> {
+pub fn import_pack(services: &HostState, pack_bytes: &[u8]) -> CmdResult<ImportView> {
     let pack: OfflinePack =
         serde_json::from_slice(pack_bytes).map_err(|error| error.to_string())?;
     let envelope: SessionEnvelope = services
@@ -209,7 +209,7 @@ pub fn import_pack(services: &HostServices, pack_bytes: &[u8]) -> CmdResult<Impo
 }
 
 /// 信封归一（core 缺口的机械映射，见文件头；唯一实现处）。
-fn envelope_of(services: &HostServices, pick: &SessionPick) -> CmdResult<SessionEnvelope> {
+fn envelope_of(services: &HostState, pick: &SessionPick) -> CmdResult<SessionEnvelope> {
     let entries = services
         .state
         .sessions_for_target(&pick.target)
@@ -258,7 +258,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[tauri::command]
 pub fn pairing_offer(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     device_name: String,
 ) -> CmdResult<OfferView> {
     offer(&state, &device_name)
@@ -266,7 +266,7 @@ pub fn pairing_offer(
 
 #[tauri::command]
 pub fn pairing_review(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     offer_json: String,
 ) -> CmdResult<PairedDevice> {
     review(&state, &offer_json)
@@ -274,20 +274,20 @@ pub fn pairing_review(
 
 #[tauri::command]
 pub fn pairing_confirm(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     device: PairedDevice,
 ) -> CmdResult<()> {
     confirm(&state, device)
 }
 
 #[tauri::command]
-pub fn pairing_devices(state: tauri::State<'_, HostServices>) -> CmdResult<Vec<PairedDevice>> {
+pub fn pairing_devices(state: tauri::State<'_, HostState>) -> CmdResult<Vec<PairedDevice>> {
     devices(&state)
 }
 
 #[tauri::command]
 pub fn pairing_unbind(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     device_id: String,
 ) -> CmdResult<PairedDevice> {
     unbind(&state, &device_id)
@@ -295,7 +295,7 @@ pub fn pairing_unbind(
 
 #[tauri::command]
 pub fn sync_transfer(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     to_device_id: String,
     pick: SessionPick,
 ) -> CmdResult<()> {
@@ -304,7 +304,7 @@ pub fn sync_transfer(
 
 #[tauri::command]
 pub fn sync_export_pack(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     to_device_id: String,
     pick: SessionPick,
     validity_secs: u64,
@@ -314,7 +314,7 @@ pub fn sync_export_pack(
 
 #[tauri::command]
 pub fn sync_import_pack(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     pack_bytes: Vec<u8>,
 ) -> CmdResult<ImportView> {
     import_pack(&state, &pack_bytes)
@@ -324,24 +324,20 @@ pub fn sync_import_pack(
 mod tests {
     use super::*;
     use crate::commands::state::{self, EndpointDto};
-    use crate::host::{HostPaths, HostServices, OfficialVerifier};
+    use crate::host::{HostLayout, HostState, HostSignatureVerifier};
     use ab_audit::InMemoryAuditSink;
     use ab_contract::{Cookie, Payload, SameSite, TargetKind};
     use ab_state::{Endpoint, EndpointKind, MatrixFilters};
     use ab_sync::SyncError;
     use std::sync::{Arc, Mutex};
 
-    fn test_services_named(device_id: &str) -> HostServices {
-        let root = std::env::temp_dir().join(format!(
-            "aibridge-pair-test-{device_id}-{}-{}",
-            std::process::id(),
-            now_unix_secs()
-        ));
+    fn test_services_named(device_id: &str) -> HostState {
+        let root = crate::host::test_root(&format!("aibridge-pair-test-{device_id}"));
         let _ = std::fs::remove_dir_all(&root);
-        HostServices::build_with(
+        HostState::build_with(
             device_id,
-            HostPaths { root },
-            OfficialVerifier::new(None, None),
+            HostLayout { root },
+            HostSignatureVerifier::new(None, None),
             Arc::new(InMemoryAuditSink::new()),
         )
     }
@@ -360,7 +356,7 @@ mod tests {
         }
     }
 
-    fn seed(services: &HostServices) {
+    fn seed(services: &HostState) {
         let endpoint = EndpointDto {
             kind: EndpointKind::Browser,
             id: "chromium".into(),
@@ -411,7 +407,7 @@ mod tests {
     }
 
     /// 互配对的两个宿主（本机 ⇄ 对端），返回 (本机, 对端, 对端设备, 本机设备)。
-    fn mutual_pairing() -> (HostServices, HostServices, PairedDevice, PairedDevice) {
+    fn mutual_pairing() -> (HostState, HostState, PairedDevice, PairedDevice) {
         let local = test_services_named("pc-local");
         let peer = test_services_named("pc-peer");
         let peer_device =

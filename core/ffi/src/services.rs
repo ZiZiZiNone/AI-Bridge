@@ -329,12 +329,12 @@ impl StateBus {
 
 /// ab-broker 镜像：`who` 记 [`FFI_ACTOR`]；`issue` 的真实会话入参 UDL 未提供（漂移）。
 pub struct Broker {
-    service: Result<broker::BrokerService, CoreError>,
+    service: Result<broker::SessionBroker, CoreError>,
     clock: Arc<dyn Clock>,
 }
 
 impl Broker {
-    fn service(&self) -> Result<&broker::BrokerService, CoreError> {
+    fn service(&self) -> Result<&broker::SessionBroker, CoreError> {
         self.service.as_ref().map_err(|e| *e)
     }
 
@@ -343,7 +343,7 @@ impl Broker {
     }
 
     pub fn issue(&self, _scope: ScopeSpec, _ttl_seconds: u32) -> Result<IssuedSession, CoreError> {
-        // 漂移：core `BrokerService::issue` 需要 `who` + 真实 `SessionEnvelope`（代持对象），
+        // 漂移：core `SessionBroker::issue` 需要 `who` + 真实 `SessionEnvelope`（代持对象），
         // UDL 签名两者皆缺；IssuedSession.account_ref 亦无来源。不自造会话（见 README）。
         Err(DRIFT)
     }
@@ -378,7 +378,7 @@ impl Broker {
                 .list(now)
                 .map_err(CoreError::from)?
                 .iter()
-                .filter(|s| s.state == broker::GrantState::Active)
+                .filter(|s| s.state == broker::SessionState::Active)
                 .map(IssuedSession::from)
                 .collect();
             service.revoke_all(FFI_ACTOR, now).map_err(CoreError::from)?;
@@ -610,11 +610,11 @@ pub fn new_core(
     let sink: Arc<audit::InMemoryAuditSink> = Arc::new(audit::InMemoryAuditSink::new());
 
     // broker 句柄查表键：UDL 无主密钥注入面，以注入 Entropy 生成一次性主密钥（shim）。
-    let broker_service = (|| -> Result<broker::BrokerService, CoreError> {
+    let broker_service = (|| -> Result<broker::SessionBroker, CoreError> {
         let adapter = EntropyAdapter(entropy.clone());
         let mut master_key = [0u8; 32];
         crypto::Entropy::fill(&adapter, &mut master_key).map_err(CoreError::from)?;
-        broker::BrokerService::new(sink.clone(), &master_key).map_err(CoreError::from)
+        broker::SessionBroker::new(sink.clone(), &master_key).map_err(CoreError::from)
     })();
 
     // 本机同步身份：UDL 无 device_id/身份注入面，以注入 Entropy 生成一次性身份（shim）。

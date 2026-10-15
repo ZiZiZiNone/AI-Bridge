@@ -4,13 +4,13 @@
 //! 全部走 `ab-mcp::McpService`（其内部转 `ab-broker`）；本层不写第二份规则。
 //! 单会话吊销走 `ab-broker::revoke`（MCP 工具面无该动作，属面板动作）。
 
-use ab_broker::GrantStatus;
+use ab_broker::SessionStatus;
 use ab_mcp::{AcquireParams, AcquireResult, ListResult, McpService, McpTarget, SessionSummary};
 use ab_state::SystemClock;
 use serde::{Deserialize, Serialize};
 
 use super::{now_unix_secs, CmdResult};
-use crate::host::{HostServices, HOST_WHO};
+use crate::host::{HostState, DESKTOP_ACTOR};
 
 /// 签发入参（命令面搬运；结构与 MCP 工具面同构，McpTarget/McpScope 直接复用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,27 +35,27 @@ impl From<&IssueParams> for AcquireParams {
 }
 
 /// 桌面侧 MCP 服务实例（与 MCP server 共享同一 broker / 会话查询）。
-fn mcp(services: &HostServices) -> McpService {
+fn mcp(services: &HostState) -> McpService {
     McpService::new(
         services.broker.clone(),
         services.state.clone(),
         Arc::new(SystemClock),
         Arc::new(services.entropy),
-        HOST_WHO,
+        DESKTOP_ACTOR,
     )
 }
 
 use std::sync::Arc;
 
 /// C1.2 / C2.1 / C4.1 签发临时会话（真会话由 broker 代持，返回一次性句柄）。
-pub fn issue(services: &HostServices, params: &IssueParams) -> CmdResult<AcquireResult> {
+pub fn issue(services: &HostState, params: &IssueParams) -> CmdResult<AcquireResult> {
     mcp(services)
         .acquire_session(&params.into())
         .map_err(|error| error.to_string())
 }
 
 /// A2.2 临时会话总览（剩余 TTL / scope / 来源；不含句柄）。
-pub fn list(services: &HostServices) -> CmdResult<ListResult> {
+pub fn list(services: &HostState) -> CmdResult<ListResult> {
     mcp(services)
         .list_sessions()
         .map_err(|error| error.to_string())
@@ -63,7 +63,7 @@ pub fn list(services: &HostServices) -> CmdResult<ListResult> {
 
 /// C2.2 续期（上限 = 签发 + 24h，core 强制）。
 pub fn renew(
-    services: &HostServices,
+    services: &HostState,
     session_id: &str,
     ttl_secs: Option<u64>,
 ) -> CmdResult<SessionSummary> {
@@ -76,22 +76,22 @@ pub fn renew(
 }
 
 /// C2.2 显式释放（只失效我方凭证，默认不登出第三方）。
-pub fn release(services: &HostServices, session_id: &str) -> CmdResult<()> {
+pub fn release(services: &HostState, session_id: &str) -> CmdResult<()> {
     mcp(services)
         .release_session(session_id)
         .map_err(|error| error.to_string())
 }
 
 /// C5.1 单会话吊销（面板动作；审计由 ab-broker 记账）。
-pub fn revoke(services: &HostServices, session_id: &str) -> CmdResult<()> {
+pub fn revoke(services: &HostState, session_id: &str) -> CmdResult<()> {
     services
         .broker
-        .revoke(HOST_WHO, session_id, now_unix_secs())
+        .revoke(DESKTOP_ACTOR, session_id, now_unix_secs())
         .map_err(|error| error.to_string())
 }
 
 /// C5.1 一键全部吊销。
-pub fn revoke_all(services: &HostServices) -> CmdResult<usize> {
+pub fn revoke_all(services: &HostState) -> CmdResult<usize> {
     mcp(services)
         .revoke_all()
         .map_err(|error| error.to_string())
@@ -99,22 +99,22 @@ pub fn revoke_all(services: &HostServices) -> CmdResult<usize> {
 }
 
 /// C2.2 空闲 / TTL 到期清理（ab-broker 的 sweep；面板刷新或定时器触发点）。
-pub fn sweep(services: &HostServices) -> CmdResult<Vec<String>> {
+pub fn sweep(services: &HostState) -> CmdResult<Vec<String>> {
     services
         .broker
-        .sweep(HOST_WHO, now_unix_secs())
+        .sweep(DESKTOP_ACTOR, now_unix_secs())
         .map_err(|error| error.to_string())
 }
 
 /// 活跃授权（候选条 C5 快捷吊销的数据源之一）。
-pub fn active_grants(services: &HostServices) -> CmdResult<Vec<GrantStatus>> {
+pub fn active_grants(services: &HostState) -> CmdResult<Vec<SessionStatus>> {
     let grants = services
         .broker
         .list(now_unix_secs())
         .map_err(|error| error.to_string())?;
     Ok(grants
         .into_iter()
-        .filter(|grant| grant.state == ab_broker::GrantState::Active)
+        .filter(|grant| grant.state == ab_broker::SessionState::Active)
         .collect())
 }
 
@@ -122,20 +122,20 @@ pub fn active_grants(services: &HostServices) -> CmdResult<Vec<GrantStatus>> {
 
 #[tauri::command]
 pub fn session_issue(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     params: IssueParams,
 ) -> CmdResult<AcquireResult> {
     issue(&state, &params)
 }
 
 #[tauri::command]
-pub fn session_list(state: tauri::State<'_, HostServices>) -> CmdResult<ListResult> {
+pub fn session_list(state: tauri::State<'_, HostState>) -> CmdResult<ListResult> {
     list(&state)
 }
 
 #[tauri::command]
 pub fn session_renew(
-    state: tauri::State<'_, HostServices>,
+    state: tauri::State<'_, HostState>,
     session_id: String,
     ttl_secs: Option<u64>,
 ) -> CmdResult<SessionSummary> {
@@ -143,22 +143,22 @@ pub fn session_renew(
 }
 
 #[tauri::command]
-pub fn session_release(state: tauri::State<'_, HostServices>, session_id: String) -> CmdResult<()> {
+pub fn session_release(state: tauri::State<'_, HostState>, session_id: String) -> CmdResult<()> {
     release(&state, &session_id)
 }
 
 #[tauri::command]
-pub fn session_revoke(state: tauri::State<'_, HostServices>, session_id: String) -> CmdResult<()> {
+pub fn session_revoke(state: tauri::State<'_, HostState>, session_id: String) -> CmdResult<()> {
     revoke(&state, &session_id)
 }
 
 #[tauri::command]
-pub fn session_revoke_all(state: tauri::State<'_, HostServices>) -> CmdResult<usize> {
+pub fn session_revoke_all(state: tauri::State<'_, HostState>) -> CmdResult<usize> {
     revoke_all(&state)
 }
 
 #[tauri::command]
-pub fn session_sweep(state: tauri::State<'_, HostServices>) -> CmdResult<Vec<String>> {
+pub fn session_sweep(state: tauri::State<'_, HostState>) -> CmdResult<Vec<String>> {
     sweep(&state)
 }
 
@@ -166,7 +166,7 @@ pub fn session_sweep(state: tauri::State<'_, HostServices>) -> CmdResult<Vec<Str
 mod tests {
     use super::*;
     use crate::commands::state::{self, EndpointDto};
-    use crate::host::{HostPaths, HostServices, OfficialVerifier};
+    use crate::host::{HostLayout, HostState, HostSignatureVerifier};
     use ab_audit::{AuditFilter, InMemoryAuditSink};
     use ab_contract::{
         Cookie, Payload, SameSite, SessionKind, SessionRecord, Source, SourceType, Target,
@@ -175,22 +175,18 @@ mod tests {
     use ab_state::{Endpoint, EndpointKind};
     use std::sync::Arc;
 
-    fn test_services() -> HostServices {
-        let root = std::env::temp_dir().join(format!(
-            "aibridge-sessions-test-{}-{}",
-            std::process::id(),
-            now_unix_secs()
-        ));
+    fn test_services() -> HostState {
+        let root = crate::host::test_root("aibridge-sessions-test");
         let _ = std::fs::remove_dir_all(&root);
-        HostServices::build_with(
+        HostState::build_with(
             "pc-test",
-            HostPaths { root },
-            OfficialVerifier::new(None, None),
+            HostLayout { root },
+            HostSignatureVerifier::new(None, None),
             Arc::new(InMemoryAuditSink::new()),
         )
     }
 
-    fn seed_session(services: &HostServices, account_ref: &str, domain: &str) {
+    fn seed_session(services: &HostState, account_ref: &str, domain: &str) {
         let endpoint = EndpointDto {
             kind: EndpointKind::Browser,
             id: "chromium".into(),
