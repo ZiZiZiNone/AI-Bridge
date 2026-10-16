@@ -187,9 +187,16 @@ mod tests {
     }
 
     fn seed_session(services: &HostState, account_ref: &str, domain: &str) {
+        seed_session_on(services, "chromium", account_ref, domain);
+    }
+
+    /// 写入一个端的会话集合。
+    /// `endpoint_id` 必须区分不同批次：`HostSessionSource::ingest` 是**按端整体替换**
+    /// （同名端二次 ingest 会覆盖前一批，见 host.rs）；要模拟「同站多账号」需用不同端。
+    fn seed_session_on(services: &HostState, endpoint_id: &str, account_ref: &str, domain: &str) {
         let endpoint = EndpointDto {
             kind: EndpointKind::Browser,
-            id: "chromium".into(),
+            id: endpoint_id.into(),
         };
         services.source.ingest(
             Endpoint::from(&endpoint),
@@ -297,9 +304,16 @@ mod tests {
         assert!(error.contains("目标不在域名白名单内"), "实际：{error}");
 
         // 同站多账号并存且未指定 account_ref → ab-mcp 消歧规则报候选。
-        seed_session(&services, "acc-2", "github.com");
+        // 两个账号来自**不同端**（ingest 按端整体替换，同端二次写入会覆盖）。
+        seed_session_on(&services, "firefox", "acc-2", "github.com");
         let error = issue(&services, &issue_params("github.com")).unwrap_err();
         assert!(error.contains("请指定 account_ref"), "实际：{error}");
+
+        // 指定 account_ref 可精确消歧（A4.1）。
+        let mut params = issue_params("github.com");
+        params.account_ref = Some("acc-2".into());
+        let grant = issue(&services, &params).expect("指定账号后应签发成功");
+        assert_eq!(grant.account_ref, "acc-2");
     }
 
     #[test]

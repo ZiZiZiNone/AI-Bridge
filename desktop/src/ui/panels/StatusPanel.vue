@@ -39,15 +39,16 @@
 <script setup lang="ts">
 import StateBlock from '../components/StateBlock.vue';
 import WindowShell from '../components/WindowShell.vue';
-import type { SessionRecord } from '../../types/contract';
+import type { MatrixRow } from '../../types/commands';
 import type { UIState } from '../../types/ui';
 
 /**
  * W4 状态清单面板（弹出面板）。
- * 受控视图：数据由 props 传入、刷新意图经 emit 上报；业务判断（到期、健康）在 core。
+ * 受控视图：矩阵行由 props 传入、刷新意图经 emit 上报；
+ * 筛选/排序、健康分级与到期判定在 core（ab-state）。
  */
 interface Props {
-  sessions?: SessionRecord[];
+  sessions?: MatrixRow[];
   state?: UIState;
   errorMessage?: string;
 }

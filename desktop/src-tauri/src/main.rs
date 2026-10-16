@@ -134,15 +134,23 @@ fn run_desktop() {
 fn dispatch_protocol(app: &tauri::AppHandle, action: ProtocolAction) {
     match action {
         ProtocolAction::ShowCandidate => {
-            let _ = ui::candidate::summon(app, ui::candidate::ShowAnchor::Pointer);
+            if let Err(error) = ui::candidate::summon(app, ui::candidate::ShowAnchor::Pointer) {
+                eprintln!("AI-Bridge 候选条打开失败：{error}");
+            }
         }
         ProtocolAction::ShowPanel(short_name) => {
             if let Some(label) = ui::panels::label_of(&short_name) {
-                let _ = ui::panels::open(app, label);
+                if let Err(error) = ui::panels::open(app, label) {
+                    eprintln!("AI-Bridge 面板 {label} 打开失败：{error}");
+                }
+            } else {
+                eprintln!("AI-Bridge 未知面板短名：{short_name}");
             }
         }
         ProtocolAction::Pair => {
-            let _ = ui::wizard::open(app, "wizard-pairing");
+            if let Err(error) = ui::wizard::open(app, "wizard-pairing") {
+                eprintln!("AI-Bridge 配对向导打开失败：{error}");
+            }
         }
     }
 }

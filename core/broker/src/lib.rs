@@ -190,9 +190,6 @@ pub struct SessionUse<'a> {
     pub action: SessionAction,
 }
 
-/// 授权许可：携带代持真会话（仅供代持通道使用，禁止回流给 AI）。
-#[derive(Debug, Clone)]
-
 /// Scheme A：AI Agent 仅凭不透明句柄发起受控 HTTP 请求，宿主内部代填 Cookie/Token 并剥离响应 `Set-Cookie`。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentHttpRequest {
@@ -215,6 +212,8 @@ pub trait AgentHttpExecutor: Send + Sync {
     fn execute(&self, authenticated_request: &AgentHttpRequest) -> Result<AgentHttpResponse, String>;
 }
 
+/// 授权许可：携带代持真会话（仅供代持通道使用，禁止回流给 AI）。
+#[derive(Debug, Clone)]
 pub struct UsePermit {
     pub session_id: String,
     pub envelope: SessionEnvelope,
@@ -822,9 +821,9 @@ impl SessionBroker {
 
 fn extract_url_host(url: &str) -> Option<String> {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let authority = rest.split(["/", "?", "#"]).next().unwrap_or("");
-    let host_port = authority.rsplit("@").next().unwrap_or(authority);
-    let host = host_port.split(":").next().unwrap_or("").trim();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host_port.split(':').next().unwrap_or("").trim();
     if host.is_empty() {
         None
     } else {

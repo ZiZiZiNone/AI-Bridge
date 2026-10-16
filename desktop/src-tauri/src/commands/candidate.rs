@@ -117,13 +117,16 @@ mod tests {
         )
     }
 
+    /// 秘密哨兵：足够独特，出现即证明秘密真的泄漏（而非字段名撞词）。
+    const SECRET_SENTINEL: &str = "SENTINEL-9f3c-secret-value";
+
     fn entry_input(title: &str, url: &str) -> library::EntryInput {
         library::EntryInput {
             title: title.into(),
             account_ref: format!("acc-{title}"),
             kind: CredentialKind::Password,
             username: Some(format!("{title}@example.com")),
-            secret: Some("secret".into()),
+            secret: Some(SECRET_SENTINEL.into()),
             totp_seed: None,
             url: Some(url.into()),
             note: None,
@@ -192,9 +195,12 @@ mod tests {
         assert_eq!(data.sessions.len(), 1, "会话按域名命中");
         assert!(data.grants.is_empty());
 
+        // 秘密纪律：`EntryView` 只出 `has_secret` / `has_totp` 布尔标记，绝不带秘密原文。
+        // 断言用哨兵值而非 "secret" 子串——后者会与 `has_secret` 字段名撞词（假阳性）。
         let debug = format!("{data:?}");
-        assert!(!debug.contains("secret"), "候选数据不得含秘密");
+        assert!(!debug.contains(SECRET_SENTINEL), "候选数据不得含秘密原文");
         assert!(!debug.contains("cookie-secret"), "候选数据不得含 cookie 值");
+        assert!(debug.contains("has_secret: true"), "带密钥的条目应标记 has_secret");
     }
 
     #[test]

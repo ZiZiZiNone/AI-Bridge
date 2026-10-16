@@ -20,15 +20,17 @@
               <th>接入等级</th>
               <th>可读路径</th>
               <th>签名者</th>
+              <th>验签</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="row in props.manifests" :key="row.id">
+            <tr v-for="row in props.converters" :key="row.id">
               <td>{{ row.name }}（{{ row.id }}）</td>
               <td>{{ row.version }}</td>
               <td>{{ levelText(row.level) }}</td>
               <td>{{ row.readable_paths.join('、') }}</td>
-              <td>{{ row.signature.signer }}</td>
+              <td>{{ row.signer }}</td>
+              <td>{{ row.verified ? '通过' : `未通过：${row.verify_error ?? '未知原因'}` }}</td>
             </tr>
           </tbody>
         </table>
@@ -40,21 +42,24 @@
 <script setup lang="ts">
 import StateBlock from '../components/StateBlock.vue';
 import WindowShell from '../components/WindowShell.vue';
-import type { AccessLevel, ConverterManifest } from '../../types/contract';
+import type { AccessLevel } from '../../types/contract';
+import type { ConverterView } from '../../types/commands';
 import type { UIState } from '../../types/ui';
 
 /**
  * W8 转换器面板（弹出面板）。
  * 受控视图：清单由 core 验签后注入；本视图只按契约字段呈现，不判断验签结果。
+ * 启用开关 core 无对应命令，未提供假开关。
  */
+
 interface Props {
-  manifests?: ConverterManifest[];
+  converters?: ConverterView[];
   state?: UIState;
   errorMessage?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  manifests: () => [],
+  converters: () => [],
   state: 'empty',
   errorMessage: '',
 });

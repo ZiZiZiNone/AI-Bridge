@@ -104,41 +104,56 @@ mod tests {
         assert_eq!(block_on(async { 40 + 2 }), 42);
     }
 
+    /// 跨线程唤醒：future 首次 poll 返回 Pending 并**保存 waker**，
+    /// 另一线程稍后置位状态并调用 `waker.wake()` —— 这才是 WinRT `Completed` 回调的真实形态。
+    /// 若 `block_on` 的 park/unpark 有缺陷，此测试会永久挂起（由 cargo test 超时暴露）。
     #[test]
     fn block_on_wakes_across_threads() {
-        let handle = std::thread::spawn(move || {
-            block_on(async {
-                let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let flag = done.clone();
-                std::thread::spawn(move || {
-                    // 模拟 WinRT 回调线程：稍后置位。
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                });
-                // 简单让步一次后返回（真正的 WinRT future 由 Completed 唤醒）。
-                YieldNow { yielded: false }.await;
-                done.load(std::sync::atomic::Ordering::SeqCst)
-            })
-        });
-        assert!(handle.join().unwrap());
-    }
-
-    struct YieldNow {
-        yielded: bool,
-    }
-    impl std::future::Future for YieldNow {
-        type Output = ();
-        fn poll(
-            mut self: std::pin::Pin<&mut Self>,
-            context: &mut Context<'_>,
-        ) -> Poll<Self::Output> {
-            if self.yielded {
-                Poll::Ready(())
-            } else {
-                self.yielded = true;
-                context.waker().wake_by_ref();
+        struct Shared {
+            done: std::sync::atomic::AtomicBool,
+            waker: std::sync::Mutex<Option<Waker>>,
+        }
+        struct AwaitFlag(Arc<Shared>);
+        impl std::future::Future for AwaitFlag {
+            type Output = bool;
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                context: &mut Context<'_>,
+            ) -> Poll<Self::Output> {
+                if self.0.done.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Poll::Ready(true);
+                }
+                *self.0.waker.lock().expect("唤醒器互斥锁中毒") = Some(context.waker().clone());
                 Poll::Pending
             }
         }
+
+        let shared = Arc::new(Shared {
+            done: std::sync::atomic::AtomicBool::new(false),
+            waker: std::sync::Mutex::new(None),
+        });
+        let worker = shared.clone();
+        let handle = std::thread::spawn(move || block_on(AwaitFlag(worker)));
+
+        // 等 future 首次 poll 保存 waker，再跨线程唤醒。
+        let mut waited = 0u32;
+        loop {
+            if shared.waker.lock().expect("唤醒器互斥锁中毒").is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            waited += 1;
+            assert!(waited < 5_000, "future 未在预期时间内保存唤醒器");
+        }
+        shared.done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let waker = shared
+            .waker
+            .lock()
+            .expect("唤醒器互斥锁中毒")
+            .take()
+            .expect("唤醒器应已保存");
+        waker.wake();
+
+        assert!(handle.join().unwrap(), "被唤醒后应返回 true");
     }
 }

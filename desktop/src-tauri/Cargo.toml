@@ -10,6 +10,11 @@ publish = false
 # 依赖改为 workspace = true（serde / serde_json 与根 workspace 版本线一致）。
 [workspace]
 
+[features]
+# Tauri 2 标准特性开关：决定产物走「内嵌前端资源」还是「连 dev server」。
+# 生产构建必须带此特性（cargo build --features custom-protocol），否则窗口加载 devUrl。
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
