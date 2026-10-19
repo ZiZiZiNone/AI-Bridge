@@ -89,6 +89,85 @@ Invoke-Check "desktop-ui"    @("npm", "run", "check")
 Invoke-Check "desktop-tsc"   @("npm", "run", "typecheck")
 Pop-Location
 
+# 5b. 桌面端交互验收（真实浏览器逐个点击按钮）
+# 为什么必须进这道门禁：check:structure / check:render 只断言「文案存在」，对死按钮完全无感
+# （docs/缺陷报告-2026-10-15.md 的 D2）——曾出现「20/20 全绿但界面点不动」。
+# 本项自己拉起 dev server、跑完关掉，不依赖外部已启动的服务。
+function Invoke-DesktopUiAcceptance {
+    if ($Exclude -contains "desktop-ui-acceptance") {
+        Write-Host "SKIP  desktop-ui-acceptance"
+        return
+    }
+    Write-Host "RUN   desktop-ui-acceptance"
+    $log = Join-Path $env:TEMP ("ab-ui-acceptance-" + [guid]::NewGuid().ToString("N") + ".log")
+    $dev = $null
+    try {
+        # 拉起 dev server（vite 只监听 localhost:1420）
+        $dev = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "dev" `
+            -WorkingDirectory (Join-Path $repo "desktop") `
+            -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput ($log + ".dev.out") `
+            -RedirectStandardError ($log + ".dev.err")
+
+        $base = "http://localhost:1420"
+        $ready = $false
+        # 用 curl.exe 探测而非 Invoke-WebRequest：后者在本机 PowerShell 下偶发
+        # 「读取控制台输出缓冲区时 Access is denied」，会把已就绪的服务误判为未就绪。
+        for ($i = 0; $i -lt 90; $i++) {
+            Start-Sleep -Milliseconds 500
+            $code = & curl.exe -s -o NUL -w "%{http_code}" "$base/?window=panel-library" 2>$null
+            if ("$code" -eq "200") { $ready = $true; break }
+        }
+        if (-not $ready) {
+            Write-Host "      dev server 90 秒内未就绪（$base），无法执行交互验收"
+            $script:results += [pscustomobject]@{ Name = "desktop-ui-acceptance"; Pass = $false }
+            Write-Host "FAIL  desktop-ui-acceptance"
+            return
+        }
+
+        Push-Location (Join-Path $repo "desktop")
+        node scripts/check-ui-acceptance.mjs --base $base 2>&1 | ForEach-Object { Write-Host "      $_" }
+        $ok = ($LASTEXITCODE -eq 0)
+        Pop-Location
+        $script:results += [pscustomobject]@{ Name = "desktop-ui-acceptance"; Pass = $ok }
+        Write-Host ("{0}  desktop-ui-acceptance" -f $(if ($ok) { "PASS" } else { "FAIL" }))
+    } finally {
+        if ($dev -and -not $dev.HasExited) {
+            # npm run dev 会派生 vite 子进程，必须整棵树杀，否则端口被占、下次门禁起不来
+            & taskkill.exe /PID $dev.Id /T /F 2>&1 | Out-Null
+        }
+        Start-Sleep -Milliseconds 800
+        Remove-Item ($log + ".dev.out"), ($log + ".dev.err") -Force -ErrorAction SilentlyContinue
+    }
+}
+Invoke-DesktopUiAcceptance
+
+# 5c. 桌面端真实窗口 E2E（建库 → 新建条目 → 重启后条目仍在）
+# 为什么单列一项：check-ui-acceptance 在 dev server 的裸浏览器里点击，只能证明
+# 「UI 会调用 invoke」；本项在真实 ab-desktop.exe 窗口内走完整用户路径，并重启进程
+# 校验数据真写进了 vault（而不是前端内存假象）。
+# 前置：debug exe 已构建。未构建时**不算失败**（跳过并说明），因为 cargo test 已覆盖编译，
+# 而真正的构建验收由 build-installer 承担；避免让纯文档/前端改动被 Rust 构建耗时拖住。
+function Invoke-DesktopRealWindowE2e {
+    if ($Exclude -contains "desktop-e2e-real") {
+        Write-Host "SKIP  desktop-e2e-real"
+        return
+    }
+    $exe = Join-Path $repo "desktop/src-tauri/target/debug/ab-desktop.exe"
+    if (-not (Test-Path $exe)) {
+        Write-Host "SKIP  desktop-e2e-real（未构建 $exe；先跑 cargo build --manifest-path desktop/src-tauri/Cargo.toml --offline --features custom-protocol）"
+        return
+    }
+    Write-Host "RUN   desktop-e2e-real"
+    Push-Location (Join-Path $repo "desktop")
+    node scripts/e2e-real-window.mjs 2>&1 | ForEach-Object { Write-Host "      $_" }
+    $ok = ($LASTEXITCODE -eq 0)
+    Pop-Location
+    $script:results += [pscustomobject]@{ Name = "desktop-e2e-real"; Pass = $ok }
+    Write-Host ("{0}  desktop-e2e-real" -f $(if ($ok) { "PASS" } else { "FAIL" }))
+}
+Invoke-DesktopRealWindowE2e
+
 $passed = @($results | Where-Object { $_.Pass }).Count
 $failed = @($results | Where-Object { -not $_.Pass })
 Write-Host ""

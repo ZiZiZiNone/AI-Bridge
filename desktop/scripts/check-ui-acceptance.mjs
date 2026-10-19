@@ -263,10 +263,17 @@ async function runtimeChecks() {
     for (const windowLabel of LABELS) {
       cdp.clear();
       await cdp.send('Page.navigate', { url: `${BASE}/?window=${windowLabel}` });
-      await sleep(1200);
 
-      const sig0 = await cdp.send('Runtime.evaluate', { expression: ACTIVITY_SIG, returnByValue: true });
-      const state = JSON.parse(sig0.result?.value ?? '{}');
+      // 轮询等待挂载完成，而非固定 sleep。
+      // 固定等待在机器负载高时（如门禁并行跑 cargo）会偶发把「还没渲染完」误判成
+      // 「窗口挂不上」——B1 曾因此假失败。判据：出现 #app 子节点，或出现未知标签提示。
+      let state = {};
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await sleep(250);
+        const probe = await cdp.send('Runtime.evaluate', { expression: ACTIVITY_SIG, returnByValue: true });
+        state = JSON.parse(probe.result?.value ?? '{}');
+        if ((state.nodes ?? 0) > 0 || /未知窗口标签/.test(state.text ?? '')) break;
+      }
 
       if (/未知窗口标签/.test(state.text ?? '')) { unknownLabel.push(windowLabel); continue; }
       if ((state.nodes ?? 0) === 0) { mountBad.push(windowLabel); continue; }

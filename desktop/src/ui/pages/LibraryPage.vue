@@ -1,6 +1,6 @@
 <template>
   <VaultGate
-    v-if="!gate.isUnlocked.value"
+    v-if="!gate.isUnlocked.value || gate.recoveryDisplay.value !== ''"
     :state="gate.state.value"
     :error-message="gate.errorMessage.value"
     :recovery-display="gate.recoveryDisplay.value"
